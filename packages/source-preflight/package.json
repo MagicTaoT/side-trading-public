@@ -1,0 +1,19 @@
+{
+  "name": "@side/source-preflight",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "preflight": "node --import tsx src/cli.ts",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.0",
+    "tsx": "^4.20.0"
+  }
+}

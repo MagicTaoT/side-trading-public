@@ -1,0 +1,21 @@
+{
+  "name": "side-trading",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.5.2",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "check": "pnpm typecheck && pnpm test",
+    "dev:s0": "pnpm --parallel --stream --filter @side/server --filter @side/web dev",
+    "smoke:s0": "pnpm --filter @side/server smoke",
+    "preflight:s0": "pnpm --filter @side/source-preflight preflight"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

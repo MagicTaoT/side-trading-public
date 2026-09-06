@@ -1,0 +1,418 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": "s0-preflight-v1",
+  "target": {
+    "requestedRegion": "local-development",
+    "hostname": "development-host",
+    "platform": "darwin 23.1.0",
+    "nodeVersion": "v26.0.0",
+    "executedAt": "2026-09-06T05:07:18.224Z"
+  },
+  "profile": {
+    "selected": "coinbase",
+    "env": "S0_CEX_PROFILE=coinbase",
+    "candidates": [
+      {
+        "profile": "coinbase",
+        "complete": true,
+        "requiredProbeIds": [
+          "coinbase.spot.metadata",
+          "coinbase.spot.ws",
+          "coinbase.perp.metadata",
+          "coinbase.perp.ws"
+        ],
+        "failedProbeIds": []
+      },
+      {
+        "profile": "binance",
+        "complete": false,
+        "requiredProbeIds": [
+          "binance.spot.metadata",
+          "binance.spot.ws",
+          "binance.perp.metadata",
+          "binance.perp.ws"
+        ],
+        "failedProbeIds": [
+          "binance.spot.metadata",
+          "binance.spot.ws",
+          "binance.perp.metadata"
+        ]
+      }
+    ],
+    "reasons": [
+      "coinbase_spot_and_perp_complete"
+    ]
+  },
+  "probes": [
+    {
+      "id": "binance.perp.metadata",
+      "source": "binance",
+      "label": "Binance USD-M SOLUSDT exchangeInfo",
+      "transport": "http",
+      "endpoint": "https://fapi.binance.com/fapi/v1/exchangeInfo",
+      "status": "fail",
+      "attempts": 3,
+      "httpStatusCounts": {
+        "451": 3
+      },
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          124.24,
+          18.99,
+          18.43
+        ],
+        "p50": 18.99,
+        "p95": 124.24
+      },
+      "entitlement": "public",
+      "metadata": {
+        "productId": "not-found",
+        "market": "perp",
+        "tradingStatus": "unknown"
+      },
+      "reasons": [
+        "binance_perp_solusdt_not_found",
+        "region_restricted_http_451"
+      ]
+    },
+    {
+      "id": "binance.perp.ws",
+      "source": "binance",
+      "label": "Binance USD-M SOLUSDT bookTicker WebSocket",
+      "transport": "websocket",
+      "endpoint": "wss://fstream.binance.com/ws/solusdt@bookTicker",
+      "status": "pass",
+      "attempts": 3,
+      "httpStatusCounts": {},
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          564.55,
+          492.43,
+          511.85
+        ],
+        "p50": 511.85,
+        "p95": 564.55
+      },
+      "entitlement": "public",
+      "metadata": {
+        "productId": "SOLUSDT",
+        "channel": "bookTicker"
+      },
+      "reasons": []
+    },
+    {
+      "id": "binance.spot.metadata",
+      "source": "binance",
+      "label": "Binance spot SOLUSDT exchangeInfo",
+      "transport": "http",
+      "endpoint": "https://api.binance.com/api/v3/exchangeInfo?symbol=SOLUSDT",
+      "status": "fail",
+      "attempts": 3,
+      "httpStatusCounts": {
+        "451": 3
+      },
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          88.98,
+          16.23,
+          18.42
+        ],
+        "p50": 18.42,
+        "p95": 88.98
+      },
+      "entitlement": "public",
+      "metadata": {
+        "productId": "not-found",
+        "market": "spot",
+        "tradingStatus": "unknown"
+      },
+      "reasons": [
+        "binance_spot_solusdt_not_found",
+        "region_restricted_http_451"
+      ]
+    },
+    {
+      "id": "binance.spot.ws",
+      "source": "binance",
+      "label": "Binance spot SOLUSDT bookTicker WebSocket",
+      "transport": "websocket",
+      "endpoint": "wss://stream.binance.com:9443/ws/solusdt@bookTicker",
+      "status": "fail",
+      "attempts": 3,
+      "httpStatusCounts": {
+        "451": 3
+      },
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          397.2,
+          424.27,
+          370.05
+        ],
+        "p50": 397.2,
+        "p95": 424.27
+      },
+      "entitlement": "unknown",
+      "metadata": {},
+      "reasons": [
+        "ws_upgrade_http_451"
+      ]
+    },
+    {
+      "id": "bitquery.wsol-usdc.ws",
+      "source": "bitquery",
+      "label": "Bitquery decoded WSOL/USDC subscription",
+      "transport": "websocket",
+      "endpoint": "wss://streaming.bitquery.io/graphql",
+      "status": "pass",
+      "attempts": 3,
+      "httpStatusCounts": {},
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          1064.65,
+          984.25,
+          880.46
+        ],
+        "p50": 984.25,
+        "p95": 1064.65
+      },
+      "entitlement": "credential-present",
+      "metadata": {
+        "pair": "WSOL-USDC",
+        "protocol": "graphql-transport-ws",
+        "subscriptionEvidence": "next"
+      },
+      "reasons": []
+    },
+    {
+      "id": "coinbase.perp.metadata",
+      "source": "coinbase-derivatives",
+      "label": "Coinbase CDE SLP public discovery",
+      "transport": "http",
+      "endpoint": "https://api.coinbase.com/api/v3/brokerage/market/products?product_type=FUTURE&limit=1000",
+      "status": "pass",
+      "attempts": 3,
+      "httpStatusCounts": {
+        "200": 3
+      },
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          206.68,
+          29.34,
+          26.96
+        ],
+        "p50": 29.34,
+        "p95": 206.68
+      },
+      "entitlement": "public",
+      "metadata": {
+        "targetProductId": "SLP-20DEC30-CDE",
+        "observedProductIds": [
+          "SLP-20DEC30-CDE"
+        ]
+      },
+      "reasons": []
+    },
+    {
+      "id": "coinbase.perp.ws",
+      "source": "coinbase-derivatives",
+      "label": "Coinbase CDE SLP public ticker WebSocket",
+      "transport": "websocket",
+      "endpoint": "wss://advanced-trade-ws.coinbase.com/",
+      "status": "pass",
+      "attempts": 3,
+      "httpStatusCounts": {},
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          455.1,
+          442.61,
+          477.15
+        ],
+        "p50": 455.1,
+        "p95": 477.15
+      },
+      "entitlement": "public",
+      "metadata": {
+        "productId": "SLP-20DEC30-CDE",
+        "channel": "ticker"
+      },
+      "reasons": []
+    },
+    {
+      "id": "coinbase.spot.metadata",
+      "source": "coinbase",
+      "label": "Coinbase SOL-USD public metadata",
+      "transport": "http",
+      "endpoint": "https://api.coinbase.com/api/v3/brokerage/market/products/SOL-USD",
+      "status": "pass",
+      "attempts": 3,
+      "httpStatusCounts": {
+        "200": 3
+      },
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          249.51,
+          27.69,
+          25.95
+        ],
+        "p50": 27.69,
+        "p95": 249.51
+      },
+      "entitlement": "public",
+      "metadata": {
+        "productId": "SOL-USD",
+        "tradingDisabled": false
+      },
+      "reasons": []
+    },
+    {
+      "id": "coinbase.spot.ws",
+      "source": "coinbase",
+      "label": "Coinbase SOL-USD ticker WebSocket",
+      "transport": "websocket",
+      "endpoint": "wss://advanced-trade-ws.coinbase.com/",
+      "status": "pass",
+      "attempts": 3,
+      "httpStatusCounts": {},
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          479.58,
+          434.81,
+          447.5
+        ],
+        "p50": 447.5,
+        "p95": 479.58
+      },
+      "entitlement": "public",
+      "metadata": {
+        "productId": "SOL-USD",
+        "channel": "ticker"
+      },
+      "reasons": []
+    },
+    {
+      "id": "hyperliquid.metadata",
+      "source": "hyperliquid",
+      "label": "Hyperliquid SOL perp metadata",
+      "transport": "http",
+      "endpoint": "https://api.hyperliquid.xyz/info",
+      "status": "pass",
+      "attempts": 3,
+      "httpStatusCounts": {
+        "200": 3
+      },
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          237.72,
+          164.08,
+          163.74
+        ],
+        "p50": 164.08,
+        "p95": 237.72
+      },
+      "entitlement": "public",
+      "metadata": {
+        "instrument": "SOL",
+        "assetIndex": 5
+      },
+      "reasons": []
+    },
+    {
+      "id": "hyperliquid.ws",
+      "source": "hyperliquid",
+      "label": "Hyperliquid SOL l2Book WebSocket",
+      "transport": "websocket",
+      "endpoint": "wss://api.hyperliquid.xyz/ws",
+      "status": "pass",
+      "attempts": 3,
+      "httpStatusCounts": {},
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [
+          412.9,
+          407.14,
+          375.49
+        ],
+        "p50": 407.14,
+        "p95": 412.9
+      },
+      "entitlement": "public",
+      "metadata": {
+        "instrument": "SOL",
+        "channel": "l2Book"
+      },
+      "reasons": []
+    },
+    {
+      "id": "jupiter.quote",
+      "source": "jupiter",
+      "label": "Jupiter explicit fallback quote",
+      "transport": "credential",
+      "endpoint": "https://api.jup.ag/swap/v1/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=So11111111111111111111111111111111111111112&amount=10000000000&slippageBps=50&restrictIntermediateTokens=true",
+      "status": "skipped",
+      "attempts": 0,
+      "httpStatusCounts": {},
+      "rateLimited": false,
+      "latencyMs": {
+        "samples": [],
+        "p50": null,
+        "p95": null
+      },
+      "entitlement": "not-applicable",
+      "metadata": {},
+      "reasons": [
+        "skipped:explicit_fallback_not_requested"
+      ]
+    },
+    {
+      "id": "zeroex.swap-instructions",
+      "source": "zeroex",
+      "label": "0x Solana swap-instructions response contract",
+      "transport": "http",
+      "endpoint": "https://api.0x.org/solana/swap-instructions",
+      "status": "fail",
+      "attempts": 3,
+      "httpStatusCounts": {
+        "200": 2,
+        "429": 1
+      },
+      "rateLimited": true,
+      "latencyMs": {
+        "samples": [
+          414.25,
+          334.13,
+          85.89
+        ],
+        "p50": 334.13,
+        "p95": 414.25
+      },
+      "entitlement": "credential-present",
+      "metadata": {
+        "pair": "USDC-SOL",
+        "responseShape": "unexpected",
+        "routeLegCount": 0
+      },
+      "reasons": [
+        "http_429_rate_limited",
+        "zeroex_response_contract_not_met"
+      ]
+    }
+  ],
+  "secretPolicy": {
+    "valuesPersisted": false,
+    "environmentVariablesChecked": [
+      "BITQUERY_TOKEN",
+      "ZEROEX_API_KEY",
+      "JUPITER_API_KEY"
+    ]
+  }
+}

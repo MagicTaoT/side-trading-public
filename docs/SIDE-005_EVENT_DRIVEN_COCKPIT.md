@@ -1,0 +1,71 @@
+# SIDE-005 - Event-driven Cockpit
+
+状态：**COMPLETE · R0 REPLAY RUNNABLE**
+日期：2026-09-04
+依赖：[SIDE-003](SIDE-003_RUNTIME_SPINE.md)、[SIDE-004](SIDE-004_SIGNAL_ENGINE.md)
+
+## 1. 已交付
+
+- 固定 `SOL / USD · 5 MIN DECISION WINDOW` cockpit；
+- CEX spot、CEX perp、DEX spot、DeFi perp 四个稳定 jury zones；
+- viewport-centered central verdict；1024 px 以下自动改为 verdict-first 非覆盖布局；
+- mode、原子 CEX profile shape、jury coverage、source freshness、model version、last valid verdict；
+- 75 ms visual micro-batch，保留 source、instrument、kind、`×N`、buy/sell count、双边 notional、最大 notional与价格范围；
+- trade/onchain-swap 才生成经济成交 bubble；BBO 只产生 quote pulse，不伪装成成交；
+- event-id seeded bubble geometry、手动 pause、hidden-page snapshot recovery、`prefers-reduced-motion`；
+- BUY / SELL / WAIT paper drawer 外壳，消费 server 提供的明确 `REPLAY` preview contract；
+- R0 页面内明确显示 `REPLAY`、`PAPER MODE` 与 `LIMITED S0 COVERAGE`。
+
+## 2. 十秒可读信息
+
+中央卡始终直接回答四个问题：
+
+1. 当前 verdict 是 BUY BIAS、SELL BIAS、NO EDGE 还是 INSUFFICIENT DATA；
+2. juries 是否达到 3/4 一致，或 coverage 尚未 ready；
+3. `FIRST OBSERVED BY SIDE` 的 leading segment；
+4. 一句由当前 jury state 生成的原因说明。
+
+当前短 fixture 的诚实结果是：`2/4 fresh · two buy-flow observations · CEX SPOT first · INSUFFICIENT DATA`。页面不会把只有 spot 证据的回放包装成方向性结论。
+
+## 3. Visual event contract
+
+`UiEvent` 在 SIDE-005 增加：
+
+- `sourceProvider`、`instrumentId`、`quoteAsset`；
+- `minPx`、`maxPx`；
+- 已存在的 count、buy/sell count、buy/sell/max notional 由 runtime 填充。
+
+浏览器按 `zone + source + venue + instrument + quote + kind` 做 75 ms 分桶。不同 venue 不合并；混合方向保留 buy/sell 两侧数据并显示为 flat，而不是只保留净方向。视觉历史继续受 50-event hard bound 约束。
+
+## 4. Paper drawer 真值边界
+
+- server snapshot 提供 frozen、response-shaped 的 0x BUY replay fixture；
+- drawer 固定标注 `REPLAY FIXTURE · NOT A LIVE QUOTE`；
+- `minimum output`、`price impact`、`fee breakdown` 未供应时显示 unknown，不猜测；
+- SELL fixture 缺少 fresh USDC→SOL anchor，因此 fail closed 为 unavailable；
+- WAIT 不要求 estimate；
+- 所有 record 按钮在 server implementation 进入 SIDE-010 前保持 disabled；
+- 没有 wallet、signer、transaction assembly 或 broadcast code path。
+
+Bitquery realized swap 与 0x-shaped preview contract 分开呈现，前者不会被重命名成可执行 estimate。
+
+## 5. 验收记录
+
+- [x] `pnpm check`：33 tests passed；
+- [x] `pnpm build` passed；
+- [x] `pnpm smoke:s0`：HTTP + WebSocket + replay pipeline passed；
+- [x] micro-batch 同桶合并、跨 venue/超窗不合并、双边字段不被 net away；
+- [x] seeded visual geometry byte-for-byte deterministic 且有界；
+- [x] 360 / 736 为单列、1024 为 verdict-first grid、1440 为 centered exclusion-zone layout 的 breakpoint contract；
+- [x] 浏览器完成 replay、BUY/SELL/WAIT drawer、motion pause 交互；
+- [x] 浏览器显示 `2/4 · CEX SPOT leading · INSUFFICIENT DATA`；
+- [x] 浏览器控制台无 warning/error。
+
+## 6. 明确边界
+
+- SIDE-005 不接 live venue；source preflight 与 profile selection 从 SIDE-006 开始；
+- frozen preview 只证明 UI contract，0x live estimate adapter 属于 SIDE-009；
+- paper decision persistence 与 markout 属于 SIDE-010；
+- 当前 bubble history 来自 bounded runtime snapshot，不引入长期图表、策略编辑器或真实执行。
+
+SIDE-005 完成后，第一个可运行里程碑成立：**R0 · REPLAY RUNNABLE**。
