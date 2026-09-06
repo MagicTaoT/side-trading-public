@@ -50,6 +50,19 @@ describe("S0Runtime LIVE mode", () => {
       sources: [{ provider: "coinbase", connection: "reconnecting", quality: "degraded", replay: false }]
     });
     expect(runtime.snapshot().recentUiEvents).toHaveLength(1);
+    expect(runtime.snapshot().flow5m.segments).toContainEqual({
+      segment: "cex-spot",
+      buyCount: 1,
+      sellCount: 0,
+      buyNotionalQuote: "212.50",
+      sellNotionalQuote: "0.00"
+    });
+
+    runtime.tick(301_002);
+    expect(runtime.snapshot().flow5m.segments.find(({ segment }) => segment === "cex-spot")).toMatchObject({
+      buyCount: 0,
+      buyNotionalQuote: "0.00"
+    });
     expect(() => runtime.startReplay()).toThrow("disabled in LIVE mode");
   });
 });

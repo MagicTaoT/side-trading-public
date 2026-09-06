@@ -1,5 +1,5 @@
 import type { UiEvent } from "@side/market-core";
-import type { SignalSnapshot } from "@side/signal-engine";
+import type { S0Segment, SignalSnapshot } from "@side/signal-engine";
 
 export type RuntimeMode = "LIVE" | "REPLAY";
 export type ReplayStatus = "disabled" | "idle" | "running" | "completed" | "stopped";
@@ -53,6 +53,20 @@ export interface LivePaperPreview {
   disabledReason: "LIVE_QUOTE_NOT_REQUESTED";
 }
 
+export interface SegmentFlowSnapshot {
+  segment: S0Segment;
+  buyCount: number;
+  sellCount: number;
+  buyNotionalQuote: string;
+  sellNotionalQuote: string;
+}
+
+export interface FlowWindowSnapshot {
+  windowMs: 300_000;
+  evaluatedAtMs: number;
+  segments: SegmentFlowSnapshot[];
+}
+
 export interface RuntimeSnapshot {
   schemaVersion: 1;
   mode: RuntimeMode;
@@ -62,6 +76,7 @@ export interface RuntimeSnapshot {
   lastIngestSeq: string | null;
   sources: SourceRuntimeState[];
   recentUiEvents: UiEvent[];
+  flow5m: FlowWindowSnapshot;
   signal: SignalSnapshot;
   paperPreview: ReplayPaperPreview | LivePaperPreview;
 }
@@ -71,6 +86,7 @@ export type GatewayMessage =
   | { type: "ui_event"; event: UiEvent }
   | { type: "source_health"; source: SourceRuntimeState }
   | { type: "signal_state"; signal: SignalSnapshot }
+  | { type: "flow_state"; flow: FlowWindowSnapshot }
   | {
       type: "resync_required";
       suppressedCountByKind: Record<string, number>;

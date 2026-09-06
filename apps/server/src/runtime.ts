@@ -1,9 +1,10 @@
 import { parseMarketEvent, parseUiEvent, type MarketEvent, type UiEvent } from "@side/market-core";
 import { decodeEventLog, ManualReplayClock, replayEvents } from "@side/recorder-replay";
-import { S0SignalEngine } from "@side/signal-engine";
+import { S0SignalEngine, type S0Segment } from "@side/signal-engine";
 import Decimal from "decimal.js";
 import type {
   GatewayMessage,
+  FlowWindowSnapshot,
   LivePaperPreview,
   ReplayPaperPreview,
   ReplayStatus,
@@ -14,11 +15,25 @@ import { BoundedGatewayQueue } from "./gateway-queue.js";
 import { IngestSequenceAllocator } from "./sequence.js";
 
 const RECENT_UI_EVENT_LIMIT_PER_ZONE = 50;
+const FLOW_WINDOW_MS = 300_000;
+
+interface FlowSample {
+  atMs: number;
+  segment: S0Segment;
+  side: "buy" | "sell";
+  notionalQuote: Decimal;
+}
 
 function retainUiEventPerZone(events: UiEvent[], next: UiEvent): UiEvent[] {
   const sameZone = events.filter(({ zone }) => zone === next.zone);
   const removeEventId = sameZone.length >= RECENT_UI_EVENT_LIMIT_PER_ZONE ? sameZone[0]?.eventId : null;
   return [...events.filter((event) => !(event.zone === next.zone && event.eventId === removeEventId)), next];
+}
+
+function signalSegmentFor(event: MarketEvent): S0Segment {
+  if (event.source.provider === "hyperliquid") return "defi-perp";
+  if (event.segment === "dex-spot") return "dex-spot";
+  return event.segment === "perp" ? "cex-perp" : "cex-spot";
 }
 
 const REPLAY_PAPER_PREVIEW: ReplayPaperPreview = Object.freeze({
@@ -131,6 +146,7 @@ export class S0Runtime {
   #sequence = new IngestSequenceAllocator();
   #signal = new S0SignalEngine();
   #seenLiveEventIds = new Set<string>();
+  #flowSamples: FlowSample[] = [];
 
   constructor(
     private readonly replayJsonl: string,
@@ -151,6 +167,7 @@ export class S0Runtime {
       lastIngestSeq: this.#lastIngestSeq,
       sources: [...this.#sources.values()].sort((left, right) => left.provider.localeCompare(right.provider)),
       recentUiEvents: [...this.#recentUiEvents],
+      flow5m: this.#flowSnapshot(),
       signal: this.#signal.snapshot(),
       paperPreview: this.mode === "LIVE" ? LIVE_PAPER_PREVIEW : REPLAY_PAPER_PREVIEW
     };
@@ -195,6 +212,7 @@ export class S0Runtime {
     this.#recentUiEvents = [];
     this.#sequence.reset();
     this.#signal.reset();
+    this.#flowSamples = [];
   }
 
   ingestLive(draft: Record<string, unknown>): MarketEvent | null {
@@ -213,6 +231,8 @@ export class S0Runtime {
 
   tick(nowMs: number): void {
     const transitions = this.#signal.tick(nowMs);
+    this.#pruneFlow(nowMs);
+    this.#broadcast({ type: "flow_state", flow: this.#flowSnapshot() });
     if (transitions.length > 0) {
       this.#broadcast({ type: "signal_state", signal: this.#signal.snapshot() });
     }
@@ -236,6 +256,7 @@ export class S0Runtime {
     this.#sources.set(source.provider, source);
 
     const signalTransitions = this.#signal.ingest(event);
+    const flowChanged = this.#recordFlow(event);
     this.#broadcast({ type: "source_health", source });
     if (event.kind !== "source-health") {
       const uiEvent = uiEventFor(event);
@@ -245,6 +266,45 @@ export class S0Runtime {
     if (signalTransitions.length > 0) {
       this.#broadcast({ type: "signal_state", signal: this.#signal.snapshot() });
     }
+    if (flowChanged) this.#broadcast({ type: "flow_state", flow: this.#flowSnapshot() });
+  }
+
+  #recordFlow(event: MarketEvent): boolean {
+    let side: "buy" | "sell" | null = null;
+    let notionalQuote: Decimal | null = null;
+    if (event.kind === "trade" && event.payload.aggressor !== "unknown") {
+      side = event.payload.aggressor;
+      notionalQuote = new Decimal(event.payload.px).mul(event.payload.sizeSOL);
+    } else if (event.kind === "onchain-swap") {
+      side = event.payload.side === "buy-sol" ? "buy" : "sell";
+      const stableAtomic = side === "buy" ? event.payload.amountInAtomic : event.payload.amountOutAtomic;
+      notionalQuote = new Decimal(stableAtomic).div(1_000_000);
+    }
+    if (!side || !notionalQuote) return false;
+    this.#flowSamples.push({ atMs: event.receivedAtUnixMs, segment: signalSegmentFor(event), side, notionalQuote });
+    this.#pruneFlow(event.receivedAtUnixMs);
+    return true;
+  }
+
+  #pruneFlow(nowMs: number): void {
+    const cutoff = nowMs - FLOW_WINDOW_MS;
+    this.#flowSamples = this.#flowSamples.filter(({ atMs }) => atMs > cutoff);
+  }
+
+  #flowSnapshot(): FlowWindowSnapshot {
+    const segments = (["cex-spot", "cex-perp", "dex-spot", "defi-perp"] as const).map((segment) => {
+      const samples = this.#flowSamples.filter((sample) => sample.segment === segment);
+      const buy = samples.filter(({ side }) => side === "buy");
+      const sell = samples.filter(({ side }) => side === "sell");
+      return {
+        segment,
+        buyCount: buy.length,
+        sellCount: sell.length,
+        buyNotionalQuote: buy.reduce((total, sample) => total.plus(sample.notionalQuote), new Decimal(0)).toFixed(2),
+        sellNotionalQuote: sell.reduce((total, sample) => total.plus(sample.notionalQuote), new Decimal(0)).toFixed(2)
+      };
+    });
+    return { windowMs: FLOW_WINDOW_MS, evaluatedAtMs: this.#signal.snapshot().evaluatedAtMs, segments };
   }
 
   #broadcast(message: GatewayMessage): void {

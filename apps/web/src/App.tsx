@@ -33,6 +33,20 @@ interface PaperPreview {
   disabledReason: "PAPER_RECORD_ENTERS_SIDE_010" | "LIVE_QUOTE_NOT_REQUESTED";
 }
 
+interface SegmentFlowSnapshot {
+  segment: S0Segment;
+  buyCount: number;
+  sellCount: number;
+  buyNotionalQuote: string;
+  sellNotionalQuote: string;
+}
+
+interface FlowWindowSnapshot {
+  windowMs: 300_000;
+  evaluatedAtMs: number;
+  segments: SegmentFlowSnapshot[];
+}
+
 interface RuntimeSnapshot {
   schemaVersion: 1;
   mode: "LIVE" | "REPLAY";
@@ -42,6 +56,7 @@ interface RuntimeSnapshot {
   lastIngestSeq: string | null;
   sources: SourceState[];
   recentUiEvents: UiEvent[];
+  flow5m: FlowWindowSnapshot;
   signal: SignalSnapshot;
   paperPreview: PaperPreview;
 }
@@ -51,6 +66,7 @@ type GatewayMessage =
   | { type: "ui_event"; event: UiEvent }
   | { type: "source_health"; source: SourceState }
   | { type: "signal_state"; signal: SignalSnapshot }
+  | { type: "flow_state"; flow: FlowWindowSnapshot }
   | { type: "resync_required"; snapshot: RuntimeSnapshot; suppressedCountByKind: Record<string, number> };
 
 type PaperAction = "BUY" | "SELL" | "WAIT";
@@ -83,6 +99,17 @@ const initialSnapshot: RuntimeSnapshot = {
   lastIngestSeq: null,
   sources: [],
   recentUiEvents: [],
+  flow5m: {
+    windowMs: 300_000,
+    evaluatedAtMs: 0,
+    segments: (["cex-spot", "cex-perp", "dex-spot", "defi-perp"] as S0Segment[]).map((segment) => ({
+      segment,
+      buyCount: 0,
+      sellCount: 0,
+      buyNotionalQuote: "0.00",
+      sellNotionalQuote: "0.00"
+    }))
+  },
   paperPreview: emptyPaperPreview,
   signal: {
     modelVersion: "s0-v1",
@@ -140,24 +167,6 @@ const segmentMeta: Record<S0Segment, { label: string; eyebrow: string; zone: UiE
   "defi-perp": { label: "DEFI PERP", eyebrow: "ONCHAIN · PERPETUAL", zone: "defi-perps", sourceHint: "Hyperliquid SOL perp" }
 };
 
-const reasonLabels: Record<string, string> = {
-  SOURCE_NOT_OBSERVED: "Source not observed",
-  SOURCE_DISCONNECTED: "Source disconnected",
-  SOURCE_STALE: "Transport stale",
-  SOURCE_GAP: "Backfill gap",
-  PRICE_WINDOW_WARMING: "Price window warming",
-  PRICE_IMPULSE_BUY: "Price impulse supports buy",
-  PRICE_IMPULSE_SELL: "Price impulse supports sell",
-  PRICE_IMPULSE_NEUTRAL: "Price impulse neutral",
-  AGGRESSOR_FLOW_BUY: "Aggressor flow supports buy",
-  AGGRESSOR_FLOW_SELL: "Aggressor flow supports sell",
-  AGGRESSOR_FLOW_NEUTRAL: "Aggressor flow neutral",
-  QUIET_OR_NO_AGGRESSOR_FLOW: "No qualifying aggressor flow",
-  MINIMUM_VOLUME_NOT_MET: "Minimum volume not met",
-  FEATURE_DISAGREEMENT: "Price and flow disagree",
-  LIMITED_SOURCE_COVERAGE: "Limited S0 coverage"
-};
-
 function upsertSource(sources: SourceState[], next: SourceState): SourceState[] {
   return [...sources.filter(({ provider }) => provider !== next.provider), next].sort((left, right) =>
     left.provider.localeCompare(right.provider)
@@ -175,18 +184,6 @@ function money(value: number): string {
     maximumFractionDigits: value >= 1_000 ? 0 : 2,
     notation: value >= 1_000_000 ? "compact" : "standard"
   }).format(value);
-}
-
-function metric(value: string | null, suffix: string): string {
-  if (value === null) return "WARMING";
-  const number = Number(value);
-  return `${number > 0 ? "+" : ""}${number.toFixed(2)}${suffix}`;
-}
-
-function flowMetric(jury: JurySnapshot): string {
-  const feature = jury.features.aggressorImbalance30s;
-  if (feature.value === null) return feature.status === "missing" ? "NO FLOW" : "BELOW MIN";
-  return `${Number(feature.value) > 0 ? "+" : ""}${(Number(feature.value) * 100).toFixed(0)}%`;
 }
 
 function verdictClass(verdict: Verdict): string {
@@ -208,6 +205,12 @@ function sourceAge(source: SourceState | undefined, evaluatedAtMs: number): stri
   if (!source) return "NOT SEEN";
   const age = Math.max(0, evaluatedAtMs - source.lastSeenAtMs);
   return age < 1_000 ? `${age}MS` : `${(age / 1_000).toFixed(1)}S`;
+}
+
+function dataAge(sources: SourceState[], evaluatedAtMs: number): string {
+  const lastSeenAtMs = Math.max(0, ...sources.map(({ lastSeenAtMs: seenAtMs }) => seenAtMs));
+  if (lastSeenAtMs === 0 || evaluatedAtMs === 0) return "—";
+  return sourceAge({ lastSeenAtMs } as SourceState, evaluatedAtMs);
 }
 
 function notionalFor(events: UiEvent[]): number {
@@ -237,41 +240,64 @@ function narrative(signal: SignalSnapshot): string {
     : "Selling pressure aligns across at least three fresh market juries.";
 }
 
-interface JuryCardProps {
+type PowerSide = "buy" | "sell";
+type PowerMarket = "spot" | "perp";
+
+const powerSegments: Record<PowerMarket, readonly S0Segment[]> = {
+  spot: ["cex-spot", "dex-spot"],
+  perp: ["cex-perp", "defi-perp"]
+};
+
+function panelLabel(segment: S0Segment): string {
+  if (segment === "dex-spot") return "DEX";
+  if (segment === "defi-perp") return "DEFI";
+  return "CEX";
+}
+
+function sideFlow(flow: SegmentFlowSnapshot | undefined, side: PowerSide): { count: number; notional: number } {
+  if (!flow) return { count: 0, notional: 0 };
+  return side === "buy"
+    ? { count: flow.buyCount, notional: Number(flow.buyNotionalQuote) }
+    : { count: flow.sellCount, notional: Number(flow.sellNotionalQuote) };
+}
+
+interface PowerCellProps {
+  segment: S0Segment;
+  side: PowerSide;
   jury: JurySnapshot;
+  flow: SegmentFlowSnapshot | undefined;
+  groupNotional: number;
   events: UiEvent[];
   sources: SourceState[];
   evaluatedAtMs: number;
   visualEpoch: number;
-  mode: "LIVE" | "REPLAY";
 }
 
-function JuryCard({ jury, events, sources, evaluatedAtMs, visualEpoch, mode }: JuryCardProps) {
-  const meta = segmentMeta[jury.segment];
-  const laneEvents = events.filter(({ zone }) => zone === meta.zone);
-  const economicEvents = laneEvents.filter(({ kind, tradeSide }) => (kind === "trade" || kind === "onchain-swap") && tradeSide !== "unknown");
+function PowerCell({ segment, side, jury, flow, groupNotional, events, sources, evaluatedAtMs, visualEpoch }: PowerCellProps) {
+  const meta = segmentMeta[segment];
+  const laneEvents = events.filter(({ zone, kind, tradeSide }) =>
+    zone === meta.zone && (kind === "trade" || kind === "onchain-swap") && tradeSide === side
+  );
+  const stats = sideFlow(flow, side);
+  const share = groupNotional > 0 ? stats.notional / groupNotional * 100 : 0;
   const providers = jury.sourceProviders.length > 0 ? jury.sourceProviders : laneEvents.map(({ sourceProvider }) => sourceProvider);
   const providerSet = [...new Set(providers)];
   const source = sources.find(({ provider }) => providerSet.includes(provider));
-  const totalNotional = notionalFor(economicEvents);
-  const acceptedCount = economicEvents.reduce((sum, event) => sum + event.count, 0);
-  const lastEvent = laneEvents.at(-1);
 
   return (
-    <article className={`jury-card segment-${jury.segment} ${jury.vote.toLowerCase()} ${jury.dataState.toLowerCase()}`} aria-label={`${meta.label} jury`}>
-      <div className="jury-heading">
-        <div><span className="kicker">{meta.eyebrow}</span><h2>{meta.label}</h2></div>
-        <div className={`jury-vote ${jury.vote.toLowerCase()}`}><span>{jury.dataState}</span><strong>{jury.vote}</strong></div>
+    <section className={`power-cell ${side} ${jury.dataState.toLowerCase()}`} aria-label={`${panelLabel(segment)} ${side} power`}>
+      <div className="power-cell-heading">
+        <h3>{panelLabel(segment)} <i className={jury.dataState === "FRESH" ? "fresh" : ""} /></h3>
+        <span className={`mini-vote ${jury.vote.toLowerCase()}`}>{jury.vote}</span>
       </div>
-      <div className="lane-stats">
-        <div><span>EVENTS</span><strong>{acceptedCount}</strong></div>
-        <div><span>NOTIONAL</span><strong>{totalNotional > 0 ? money(totalNotional) : "—"}</strong></div>
-        <div><span>PRICE Δ30S</span><strong>{metric(jury.features.priceImpulse30s.valueBps, " BP")}</strong></div>
-        <div><span>FLOW</span><strong>{flowMetric(jury)}</strong></div>
+      <div className="power-cell-stats">
+        <span><strong>{stats.count.toLocaleString()}</strong> events</span>
+        <span><strong>{stats.notional > 0 ? money(stats.notional) : "—"}</strong></span>
+        <span className="share"><strong>{share.toFixed(1)}%</strong></span>
       </div>
-      <div className={`bubble-field ${lastEvent?.kind === "bbo" ? "quote-tick" : ""}`} key={`${visualEpoch}:${jury.segment}`}>
-        {economicEvents.length === 0 ? <div className="lane-empty"><span>{jury.dataState === "FRESH" ? "TRANSPORT LIVE" : "AWAITING SOURCE"}</span><small>{meta.sourceHint}</small></div> : null}
-        {economicEvents.slice(-12).map((event) => {
+      <div className={`bubble-field power-bubbles ${side}`} key={`${visualEpoch}:${segment}:${side}`}>
+        {laneEvents.length === 0 ? <div className="lane-empty"><span>{jury.dataState === "FRESH" ? "LIVE · NO RECENT TRADES" : "AWAITING SOURCE"}</span><small>{meta.sourceHint}</small></div> : null}
+        {laneEvents.slice(-18).map((event) => {
           const visual = seededVisual(event);
           const style = {
             "--bubble-x": `${visual.xPercent}%`,
@@ -280,16 +306,56 @@ function JuryCard({ jury, events, sources, evaluatedAtMs, visualEpoch, mode }: J
             "--bubble-delay": `${visual.delayMs}ms`
           } as CSSProperties;
           return (
-            <div className={`trade-bubble ${event.tradeSide === "sell" ? "sell" : "buy"}`} key={`${event.eventId}:${event.streamSeq}`} style={style} tabIndex={0} aria-label={`${event.venueLabel} ${event.kind}, ${event.tradeSide}, batch ${event.count}, ${money(Number(event.maxNotional ?? 0))}`} title={`${event.venueLabel} · ${event.tradeSide} · ×${event.count}`}>
+            <div className={`trade-bubble ${side}`} key={`${event.eventId}:${event.streamSeq}`} style={style} tabIndex={0} aria-label={`${event.venueLabel} ${side}, batch ${event.count}, ${money(Number(event.maxNotional ?? 0))}`} title={`${event.venueLabel} · ${side} · ×${event.count}`}>
               <strong>×{event.count}</strong><span>{event.venueLabel}</span>
             </div>
           );
         })}
       </div>
-      <div className="jury-evidence">
-        <div><span>SOURCE / PROFILE</span><strong>{providerSet.length > 0 ? providerSet.join(" + ").toUpperCase() : meta.sourceHint.toUpperCase()}</strong></div>
-        <div><span>{mode === "LIVE" ? "SOURCE AGE" : "REPLAY AGE"}</span><strong>{sourceAge(source, evaluatedAtMs)}</strong></div>
-        <p>{jury.reasons.slice(0, 2).map((reason) => reasonLabels[reason] ?? reason).join(" · ")}</p>
+      <div className="power-cell-footer">
+        <span>{providerSet.length > 0 ? providerSet.join(" + ").toUpperCase() : meta.sourceHint.toUpperCase()}</span>
+        <strong>{sourceAge(source, evaluatedAtMs)}</strong>
+      </div>
+    </section>
+  );
+}
+
+interface PowerQuadrantProps {
+  market: PowerMarket;
+  side: PowerSide;
+  flow5m: FlowWindowSnapshot;
+  juries: JurySnapshot[];
+  events: UiEvent[];
+  sources: SourceState[];
+  visualEpoch: number;
+}
+
+function PowerQuadrant({ market, side, flow5m, juries, events, sources, visualEpoch }: PowerQuadrantProps) {
+  const segments = powerSegments[market];
+  const flows = segments.map((segment) => flow5m.segments.find((candidate) => candidate.segment === segment));
+  const totalNotional = flows.reduce((sum, flow) => sum + sideFlow(flow, side).notional, 0);
+
+  return (
+    <article className={`power-quadrant ${market}-${side} ${side}`} aria-label={`${market} ${side} power`}>
+      <div className="power-quadrant-heading">
+        <h2>{market.toUpperCase()} · {side.toUpperCase()} POWER</h2>
+        <span>5M {side.toUpperCase()} VOLUME <strong>{totalNotional > 0 ? money(totalNotional) : "—"}</strong></span>
+      </div>
+      <div className="power-cell-grid">
+        {segments.map((segment) => (
+          <PowerCell
+            key={`${segment}:${side}`}
+            segment={segment}
+            side={side}
+            jury={juries.find((candidate) => candidate.segment === segment) as JurySnapshot}
+            flow={flow5m.segments.find((candidate) => candidate.segment === segment)}
+            groupNotional={totalNotional}
+            events={events}
+            sources={sources}
+            evaluatedAtMs={flow5m.evaluatedAtMs}
+            visualEpoch={visualEpoch}
+          />
+        ))}
       </div>
     </article>
   );
@@ -379,6 +445,7 @@ export function App() {
         else if (message.type === "ui_event") { pendingEvents.push(message.event); flushTimer ??= window.setTimeout(flushPendingEvents, VISUAL_BATCH_MS); }
         else if (message.type === "source_health") setSnapshot((current) => ({ ...current, sources: upsertSource(current.sources, message.source) }));
         else if (message.type === "signal_state") setSnapshot((current) => ({ ...current, signal: message.signal }));
+        else if (message.type === "flow_state") setSnapshot((current) => ({ ...current, flow5m: message.flow }));
       } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     });
     return () => { active = false; if (flushTimer !== undefined) window.clearTimeout(flushTimer); socket.close(); };
@@ -415,12 +482,17 @@ export function App() {
   const sourceQuality = snapshot.sources.some(({ quality }) => quality !== "fresh") ? "DEGRADED" : snapshot.sources.length > 0 ? "FRESH" : "WAITING";
   const verdict = snapshot.signal.verdict;
   const suspended = motionPaused || pageHidden;
+  const buyPower = snapshot.flow5m.segments.reduce((total, flow) => total + Number(flow.buyNotionalQuote), 0);
+  const sellPower = snapshot.flow5m.segments.reduce((total, flow) => total + Number(flow.sellNotionalQuote), 0);
+  const totalPower = buyPower + sellPower;
+  const buyPowerPercent = totalPower > 0 ? buyPower / totalPower * 100 : 50;
+  const sellPowerPercent = 100 - buyPowerPercent;
 
   return (
     <main className={suspended ? "motion-suspended" : ""}>
       <header className="topbar">
         <div className="brand-block"><strong className="brand">SIDE</strong><span className="instrument">SOL / USD</span><span className="window-label">5 MIN DECISION WINDOW</span></div>
-        <div className="status-strip" aria-label="Runtime status"><strong className="mode-pill">{snapshot.mode}</strong><span className="paper-pill">PAPER MODE</span><span className={`connection-state ${connection.toLowerCase()}`}><i />{connection}</span><span className={`quality-state ${sourceQuality.toLowerCase()}`}>{sourceQuality}</span></div>
+        <div className="status-strip" aria-label="Runtime status"><span className="data-age">DATA AGE <strong>{dataAge(snapshot.sources, snapshot.flow5m.evaluatedAtMs)}</strong></span><strong className="mode-pill">{snapshot.mode}</strong><span className="paper-pill">PAPER MODE</span><span className={`connection-state ${connection.toLowerCase()}`}><i />{connection}</span><span className={`quality-state ${sourceQuality.toLowerCase()}`}>{sourceQuality}</span></div>
       </header>
 
       <section className="runtime-bar" aria-label={`${snapshot.mode} runtime controls`}>
@@ -435,8 +507,11 @@ export function App() {
       {error ? <p className="error" role="alert">{error}</p> : null}
 
       <section className="cockpit" aria-label="SOL cross-market cockpit">
-        <div className="jury-grid">
-          {snapshot.signal.juries.map((jury) => <JuryCard key={jury.segment} jury={jury} events={batches} sources={snapshot.sources} evaluatedAtMs={snapshot.signal.evaluatedAtMs} visualEpoch={visualEpoch} mode={snapshot.mode} />)}
+        <div className="power-board">
+          <PowerQuadrant market="spot" side="buy" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={batches} sources={snapshot.sources} visualEpoch={visualEpoch} />
+          <PowerQuadrant market="spot" side="sell" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={batches} sources={snapshot.sources} visualEpoch={visualEpoch} />
+          <PowerQuadrant market="perp" side="buy" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={batches} sources={snapshot.sources} visualEpoch={visualEpoch} />
+          <PowerQuadrant market="perp" side="sell" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={batches} sources={snapshot.sources} visualEpoch={visualEpoch} />
         </div>
         <article className={`verdict-card ${verdictClass(verdict.verdict)}`} aria-label="Market verdict">
           <span className="kicker">MARKET VERDICT · {snapshot.signal.modelVersion.toUpperCase()}</span>
@@ -446,6 +521,19 @@ export function App() {
           <div className="leader-row"><span>FIRST OBSERVED BY SIDE</span><strong>{leading}</strong></div>
           <div className="verdict-actions"><button type="button" className="buy-action" onClick={() => setPaperAction("BUY")}>PAPER BUY</button><button type="button" className="wait-action" onClick={() => setPaperAction("WAIT")}>RECORD WAIT</button><button type="button" className="sell-action" onClick={() => setPaperAction("SELL")}>PAPER SELL</button></div>
         </article>
+      </section>
+
+      <section className="power-balance" aria-label="Five minute buy sell power balance">
+        <div className="balance-track">
+          <div className="balance-buy" style={{ width: `${buyPowerPercent}%` }} />
+          <div className="balance-sell" style={{ width: `${sellPowerPercent}%` }} />
+          <i style={{ left: `${buyPowerPercent}%` }} />
+        </div>
+        <div className="balance-labels">
+          <strong className="buy">BUY {buyPowerPercent.toFixed(0)}% <span>{money(buyPower)}</span></strong>
+          <span>5M REALIZED FLOW</span>
+          <strong className="sell">SELL {sellPowerPercent.toFixed(0)}% <span>{money(sellPower)}</span></strong>
+        </div>
       </section>
 
       <section className="activity-rail" aria-label="Visual micro batches">

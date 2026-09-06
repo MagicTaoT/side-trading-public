@@ -13,6 +13,17 @@ const snapshot: RuntimeSnapshot = {
   lastIngestSeq: null,
   sources: [],
   recentUiEvents: [],
+  flow5m: {
+    windowMs: 300_000,
+    evaluatedAtMs: 0,
+    segments: (["cex-spot", "cex-perp", "dex-spot", "defi-perp"] as const).map((segment) => ({
+      segment,
+      buyCount: 0,
+      sellCount: 0,
+      buyNotionalQuote: "0.00",
+      sellNotionalQuote: "0.00"
+    }))
+  },
   signal: new S0SignalEngine().snapshot(),
   paperPreview: {
     schemaVersion: 1,

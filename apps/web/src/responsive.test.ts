@@ -9,8 +9,8 @@ describe("cockpit responsive contract", () => {
     expect(css).toMatch(/@media \(max-width: 1100px\)[\s\S]*?\.verdict-card\s*\{[\s\S]*?transform:\s*none/);
   });
 
-  it("uses a single-column jury map at 736px and 360px", () => {
-    expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*?\.jury-grid\s*\{[\s\S]*?flex-direction:\s*column/);
+  it("uses a single-column power map at 736px and 360px", () => {
+    expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*?\.power-board\s*\{[\s\S]*?flex-direction:\s*column/);
     expect(css).toContain("@media (max-width: 390px)");
   });
 
