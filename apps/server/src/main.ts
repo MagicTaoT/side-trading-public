@@ -4,6 +4,7 @@ import { createApp } from "./app.js";
 import { loadDefaultReplayFixture } from "./fixture.js";
 import { discoverCoinbaseSlpProduct } from "./live/coordinator.js";
 import { MemoryDecisionJournal, PostgresDecisionJournal } from "./paper/journal.js";
+import { MemoryStrategyJournal, PostgresStrategyJournal } from "./strategy/journal.js";
 
 const invocationDirectory = process.env.INIT_CWD ?? process.cwd();
 for (const fileName of [".env.preflight.local", ".env.live.local"]) {
@@ -30,6 +31,7 @@ const app = await createApp({
   mode,
   cexProfile: mode === "LIVE" ? "coinbase" : "coinbase",
   journal: databaseUrl ? new PostgresDecisionJournal(databaseUrl) : new MemoryDecisionJournal(),
+  strategyJournal: databaseUrl ? new PostgresStrategyJournal(databaseUrl) : new MemoryStrategyJournal(),
   ...(mode === "LIVE" && bitqueryToken && coinbasePerpProductId
     ? { live: { bitqueryToken, coinbasePerpProductId } }
     : {}),

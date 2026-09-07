@@ -7,6 +7,8 @@ export interface UiEventMerge {
 
 export const VISUAL_BATCH_MS = 75;
 export const UI_EVENT_WINDOW_MS = 300_000;
+export const BITQUERY_VISUAL_BUCKET_MS = 1_000;
+export const BITQUERY_MATERIAL_NOTIONAL = 1_000;
 const RECENT_STATE_EVENT_LIMIT_PER_ZONE = 50;
 
 export function clampedVolumeShare(
@@ -83,6 +85,11 @@ function bubbleBatchKey(event: UiEvent): string {
   return `${batchKey(event)}:${event.tradeSide}`;
 }
 
+function bitqueryVisualBucketKey(event: UiEvent): string {
+  const bucket = Math.floor(event.batchStartMs / BITQUERY_VISUAL_BUCKET_MS);
+  return [event.zone, event.sourceProvider, event.instrumentId, event.quoteAsset, event.kind, event.tradeSide, bucket].join(":");
+}
+
 function sumDecimal(left: string | undefined, right: string | undefined): string | undefined {
   if (left === undefined && right === undefined) return undefined;
   return ((Number(left ?? 0) + Number(right ?? 0))).toFixed(2);
@@ -147,8 +154,41 @@ export function microBatchUiEvents(events: UiEvent[], windowMs = VISUAL_BATCH_MS
 export function microBatchBubbleEvents(events: UiEvent[], windowMs = VISUAL_BATCH_MS): UiEvent[] {
   const batches: UiEvent[] = [];
   const latestBatchByLane = new Map<string, number>();
+  const bitqueryBatchByBucket = new Map<string, number>();
 
   for (const event of events.filter(isTradeBubbleEvent)) {
+    const notional = Number(event.maxNotional ?? event.buyNotional ?? event.sellNotional ?? 0);
+    const isBitquerySmallSwap = event.sourceProvider === "bitquery" &&
+      event.kind === "onchain-swap" &&
+      Number.isFinite(notional) &&
+      notional < BITQUERY_MATERIAL_NOTIONAL;
+
+    if (isBitquerySmallSwap) {
+      const key = bitqueryVisualBucketKey(event);
+      const previousIndex = bitqueryBatchByBucket.get(key);
+      const previous = previousIndex === undefined ? undefined : batches[previousIndex];
+      if (!previous || previousIndex === undefined) {
+        batches.push({
+          ...event,
+          eventId: `visual:bitquery:${key}`,
+          venueLabel: "DEX FLOW",
+          label: "bitquery one-second visual aggregate"
+        });
+        bitqueryBatchByBucket.set(key, batches.length - 1);
+        continue;
+      }
+
+      batches[previousIndex] = mergeBubbleBatch(previous, event);
+      continue;
+    }
+
+    // Material Bitquery swaps retain their canonical identity and never disappear
+    // into a nearby small-flow aggregate.
+    if (event.sourceProvider === "bitquery" && event.kind === "onchain-swap") {
+      batches.push(event);
+      continue;
+    }
+
     const key = bubbleBatchKey(event);
     const previousIndex = latestBatchByLane.get(key);
     const previous = previousIndex === undefined ? undefined : batches[previousIndex];
@@ -161,29 +201,33 @@ export function microBatchBubbleEvents(events: UiEvent[], windowMs = VISUAL_BATC
       continue;
     }
 
-    const buyNotional = sumDecimal(previous.buyNotional, event.buyNotional);
-    const sellNotional = sumDecimal(previous.sellNotional, event.sellNotional);
-    const maxNotional = maxDecimal(previous.maxNotional, event.maxNotional);
-    const minPx = minDecimal(previous.minPx, event.minPx);
-    const maxPx = maxDecimal(previous.maxPx, event.maxPx);
-
-    batches[previousIndex] = {
-      ...previous,
-      streamSeq: event.streamSeq,
-      stateVersion: event.stateVersion,
-      count: previous.count + event.count,
-      batchEndMs: Math.max(previous.batchEndMs, event.batchEndMs),
-      buyCount: (previous.buyCount ?? 0) + (event.buyCount ?? 0),
-      sellCount: (previous.sellCount ?? 0) + (event.sellCount ?? 0),
-      ...(buyNotional === undefined ? {} : { buyNotional }),
-      ...(sellNotional === undefined ? {} : { sellNotional }),
-      ...(maxNotional === undefined ? {} : { maxNotional }),
-      ...(minPx === undefined ? {} : { minPx }),
-      ...(maxPx === undefined ? {} : { maxPx })
-    };
+    batches[previousIndex] = mergeBubbleBatch(previous, event);
   }
 
   return batches;
+}
+
+function mergeBubbleBatch(previous: UiEvent, event: UiEvent): UiEvent {
+  const buyNotional = sumDecimal(previous.buyNotional, event.buyNotional);
+  const sellNotional = sumDecimal(previous.sellNotional, event.sellNotional);
+  const maxNotional = maxDecimal(previous.maxNotional, event.maxNotional);
+  const minPx = minDecimal(previous.minPx, event.minPx);
+  const maxPx = maxDecimal(previous.maxPx, event.maxPx);
+
+  return {
+    ...previous,
+    streamSeq: event.streamSeq,
+    stateVersion: event.stateVersion,
+    count: previous.count + event.count,
+    batchEndMs: Math.max(previous.batchEndMs, event.batchEndMs),
+    buyCount: (previous.buyCount ?? 0) + (event.buyCount ?? 0),
+    sellCount: (previous.sellCount ?? 0) + (event.sellCount ?? 0),
+    ...(buyNotional === undefined ? {} : { buyNotional }),
+    ...(sellNotional === undefined ? {} : { sellNotional }),
+    ...(maxNotional === undefined ? {} : { maxNotional }),
+    ...(minPx === undefined ? {} : { minPx }),
+    ...(maxPx === undefined ? {} : { maxPx })
+  };
 }
 
 export interface SeededVisual {
@@ -191,6 +235,20 @@ export interface SeededVisual {
   yPercent: number;
   diameterPx: number;
   delayMs: number;
+}
+
+function mix32(value: number): number {
+  let mixed = value >>> 0;
+  mixed ^= mixed >>> 16;
+  mixed = Math.imul(mixed, 0x7feb352d);
+  mixed ^= mixed >>> 15;
+  mixed = Math.imul(mixed, 0x846ca68b);
+  mixed ^= mixed >>> 16;
+  return mixed >>> 0;
+}
+
+function unitInterval(value: number): number {
+  return value / 0x1_0000_0000;
 }
 
 export function bubbleAgeOpacity(
@@ -211,11 +269,17 @@ export function seededVisual(event: UiEvent): SeededVisual {
   }
   const unsigned = seed >>> 0;
   const notional = Number(event.maxNotional ?? event.buyNotional ?? event.sellNotional ?? 0);
+  const diameterPx = Math.round(Math.min(72, Math.max(22, 22 + Math.sqrt(notional) * 0.42)));
+  const sizeRatio = (diameterPx - 22) / (72 - 22);
+  const xMargin = 6 + sizeRatio * 6;
+  const yMargin = 12 + sizeRatio * 9;
+  const xUnit = unitInterval(mix32(unsigned ^ 0x9e3779b9));
+  const yUnit = unitInterval(mix32(unsigned ^ 0x85ebca6b));
 
   return {
-    xPercent: 14 + (unsigned % 72),
-    yPercent: 20 + ((unsigned >>> 8) % 58),
-    diameterPx: Math.round(Math.min(72, Math.max(22, 22 + Math.sqrt(notional) * 0.42))),
-    delayMs: (unsigned >>> 16) % 180
+    xPercent: Math.round((xMargin + xUnit * (100 - xMargin * 2)) * 10) / 10,
+    yPercent: Math.round((yMargin + yUnit * (100 - yMargin * 2)) * 10) / 10,
+    diameterPx,
+    delayMs: mix32(unsigned ^ 0xc2b2ae35) % 180
   };
 }

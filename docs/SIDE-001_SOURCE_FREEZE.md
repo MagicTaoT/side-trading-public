@@ -95,7 +95,7 @@ dexFlowImbalance30s = (buyNotional - sellNotional) / totalNotional
 - BUY：0x ExactIn，输入固定 10,000 USDC；
 - SELL：先用同一 provider 获取 fresh 10,000 USDC → SOL anchor estimate，再以得到的 SOL 数量请求 ExactIn SOL → USDC；两个 request id、时间与 source 一起固化；
 - 0x 失败时先显示 unavailable；只有用户点击 `TRY JUPITER ESTIMATE` 才以同一双请求口径重新报价；
-- record 时服务端复核 provider、pair、amount、source health 与 SIDE 本地 2 秒 TTL；
+- record 时服务端复核 provider、pair、amount、source health 与 SIDE 本地 10 秒 TTL；
 - 0x 与 Jupiter 都失败时禁止 record order；
 - `amountOut`/`minAmountOut` 是 estimate，不是锁价或成交保证；0x 未提供的 price impact/fee breakdown 保持 `not-supplied`。
 

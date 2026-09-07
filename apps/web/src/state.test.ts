@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { UiEvent } from "@side/market-core";
 import {
+  BITQUERY_MATERIAL_NOTIONAL,
+  BITQUERY_VISUAL_BUCKET_MS,
   bubbleAgeOpacity,
   bubbleVisualKey,
   clampedVolumeShare,
@@ -131,10 +133,33 @@ describe("microBatchUiEvents", () => {
 describe("seededVisual", () => {
   it("returns deterministic bounded motion geometry", () => {
     expect(seededVisual(event)).toEqual(seededVisual(event));
-    expect(seededVisual(event).xPercent).toBeGreaterThanOrEqual(14);
-    expect(seededVisual(event).xPercent).toBeLessThanOrEqual(85);
+    expect(seededVisual(event).xPercent).toBeGreaterThanOrEqual(6);
+    expect(seededVisual(event).xPercent).toBeLessThanOrEqual(94);
+    expect(seededVisual(event).yPercent).toBeGreaterThanOrEqual(12);
+    expect(seededVisual(event).yPercent).toBeLessThanOrEqual(88);
     expect(seededVisual(event).diameterPx).toBeGreaterThanOrEqual(22);
     expect(seededVisual(event).diameterPx).toBeLessThanOrEqual(72);
+  });
+
+  it("decorrelates similar event ids and fills the bubble field", () => {
+    const points = Array.from({ length: 240 }, (_, index) => seededVisual({
+      ...event,
+      eventId: `visual:bitquery:dex-spot:bitquery:SOL-USD:USD:onchain-swap:buy:${1_800_000 + index}`
+    }));
+    const xs = points.map(({ xPercent }) => xPercent);
+    const ys = points.map(({ yPercent }) => yPercent);
+    const meanX = xs.reduce((sum, value) => sum + value, 0) / xs.length;
+    const meanY = ys.reduce((sum, value) => sum + value, 0) / ys.length;
+    const covariance = points.reduce((sum, point) => sum + (point.xPercent - meanX) * (point.yPercent - meanY), 0);
+    const spreadX = Math.sqrt(xs.reduce((sum, value) => sum + (value - meanX) ** 2, 0));
+    const spreadY = Math.sqrt(ys.reduce((sum, value) => sum + (value - meanY) ** 2, 0));
+    const correlation = covariance / (spreadX * spreadY);
+
+    expect(Math.abs(correlation)).toBeLessThan(0.2);
+    expect(Math.min(...xs)).toBeLessThan(10);
+    expect(Math.max(...xs)).toBeGreaterThan(90);
+    expect(Math.min(...ys)).toBeLessThan(16);
+    expect(Math.max(...ys)).toBeGreaterThan(84);
   });
 
   it("keeps a bubble identity stable while its micro-batch is updated", () => {
@@ -170,5 +195,74 @@ describe("microBatchBubbleEvents", () => {
     expect(bubbles).toHaveLength(2);
     expect(bubbles[0]).toMatchObject({ eventId: event.eventId, streamSeq: "102", count: 2, tradeSide: "buy" });
     expect(bubbles[1]).toMatchObject({ eventId: sell.eventId, tradeSide: "sell" });
+  });
+
+  it("compresses sub-$1k Bitquery swaps into fixed one-second side buckets across DEX protocols", () => {
+    const first: UiEvent = {
+      ...event,
+      eventId: "bitquery:swap:first",
+      sourceProvider: "bitquery",
+      zone: "dex-spot",
+      venueLabel: "raydium_amm",
+      kind: "onchain-swap",
+      buyNotional: "40.00",
+      maxNotional: "40.00"
+    };
+    const second: UiEvent = {
+      ...first,
+      eventId: "bitquery:swap:second",
+      streamSeq: "101",
+      venueLabel: "jupiter",
+      batchStartMs: 1_900,
+      batchEndMs: 1_900,
+      buyNotional: "50.00",
+      maxNotional: "50.00"
+    };
+    const material: UiEvent = {
+      ...second,
+      eventId: "bitquery:swap:material",
+      streamSeq: "102",
+      batchStartMs: 1_950,
+      batchEndMs: 1_950,
+      buyNotional: BITQUERY_MATERIAL_NOTIONAL.toFixed(2),
+      maxNotional: BITQUERY_MATERIAL_NOTIONAL.toFixed(2)
+    };
+    const nextBucket: UiEvent = {
+      ...first,
+      eventId: "bitquery:swap:next",
+      streamSeq: "103",
+      batchStartMs: BITQUERY_VISUAL_BUCKET_MS * 2,
+      batchEndMs: BITQUERY_VISUAL_BUCKET_MS * 2
+    };
+    const sell: UiEvent = {
+      ...second,
+      eventId: "bitquery:swap:sell",
+      streamSeq: "104",
+      tradeSide: "sell",
+      changeDirection: "down",
+      buyCount: 0,
+      sellCount: 1,
+      buyNotional: undefined,
+      sellNotional: "25.00",
+      maxNotional: "25.00"
+    };
+
+    const bubbles = microBatchBubbleEvents([first, second, material, nextBucket, sell]);
+    const aggregated = bubbles[0] as UiEvent;
+    const nextAggregate = bubbles[2] as UiEvent;
+
+    expect(bubbles).toHaveLength(4);
+    expect(aggregated).toMatchObject({
+      eventId: expect.stringContaining("visual:bitquery:"),
+      venueLabel: "DEX FLOW",
+      count: 2,
+      buyCount: 2,
+      buyNotional: "90.00",
+      maxNotional: "50.00",
+      batchEndMs: 1_900
+    });
+    expect(bubbles[1]).toMatchObject({ eventId: material.eventId, count: 1, maxNotional: "1000.00" });
+    expect(nextAggregate.eventId).not.toBe(aggregated.eventId);
+    expect(bubbles[3]).toMatchObject({ tradeSide: "sell", count: 1, sellNotional: "25.00" });
   });
 });

@@ -67,12 +67,29 @@ describe("SIDE-010 paper estimate broker", () => {
       status: "READY",
       provider: "zeroex",
       side: "BUY",
+      expiresAtMs: 11_100,
       estimatedOutputSOL: "56.710000000",
       referencePxQuotePerSol: "176.335743",
       effectivePxQuotePerSol: "176.335743",
       recordable: true
     });
     expect(JSON.stringify(first)).not.toMatch(/instructions|api.?key|taker/iu);
+  });
+
+  it("keeps the default action preview valid for ten seconds", async () => {
+    let now = 11_099;
+    const zeroex = new FakeProvider("zeroex", (request) => leg("zeroex", request, "56710000000", 1_000));
+    const broker = new PaperEstimateBroker({ mode: "LIVE", evidence, zeroex, now: () => now, id: ids() });
+    const preview = await broker.preview({ side: "BUY", provider: "zeroex", idempotencyKey: "preview-default-ttl", primaryFailureId: null });
+
+    expect(preview).toMatchObject({ expiresAtMs: 11_100, quoteAgeMs: 9_999, recordable: true });
+    now = 11_101;
+    await expect(broker.record({
+      action: "BUY",
+      previewId: preview.previewId,
+      provider: "zeroex",
+      idempotencyKey: "record-default-ttl"
+    })).rejects.toMatchObject({ code: "PREVIEW_EXPIRED", statusCode: 410 });
   });
 
   it("uses a same-provider USDC anchor before the SELL exact-in request", async () => {

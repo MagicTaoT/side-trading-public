@@ -28,6 +28,13 @@ interface FlowSample {
   notionalQuote: Decimal;
 }
 
+export interface ReplayObservationPoint {
+  /** Monotonic offset from the first replay event. */
+  elapsedMs: number;
+  /** Original event time used to select a contemporaneous theoretical reference. */
+  referenceAtMs: number;
+}
+
 function isTradeBubbleEvent(event: UiEvent): boolean {
   return (event.kind === "trade" || event.kind === "onchain-swap") &&
     (event.tradeSide === "buy" || event.tradeSide === "sell");
@@ -251,12 +258,18 @@ export class S0Runtime {
     return () => this.#clients.delete(clientId);
   }
 
-  startReplay(): RuntimeSnapshot {
+  startReplay(onObservation?: (point: ReplayObservationPoint) => void): RuntimeSnapshot {
     if (this.mode === "LIVE") throw new Error("Replay controls are disabled in LIVE mode");
     this.#reset();
     this.#replayStatus = "running";
     const events = decodeEventLog(this.replayJsonl);
-    replayEvents(events, new ManualReplayClock(0), ({ event }) => this.#ingest(event));
+    replayEvents(events, new ManualReplayClock(0), ({ event, replayClockMs }) => {
+      this.#ingest(event);
+      onObservation?.({
+        elapsedMs: replayClockMs,
+        referenceAtMs: event.receivedAtUnixMs
+      });
+    });
     this.#replayStatus = "completed";
     this.#broadcast({ type: "state_snapshot", snapshot: this.snapshot() });
     return this.snapshot();

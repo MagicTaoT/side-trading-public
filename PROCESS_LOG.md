@@ -84,3 +84,52 @@
 - 实现：历史新增 `ENTRY EDGE`，直接读取持久化 evidence 内的 entry verdict；新增逐行 `DELETE → CONFIRM` 与服务端 DELETE route。
 - 删除语义：PostgreSQL 使用既有 `ON DELETE CASCADE` 同步删除 evidence、order snapshot 和 markout；内存 journal 同步移除 idempotency 映射，删除后重新拉取 aggregate。
 - 验证：memory、HTTP 与独立 `side_test` PostgreSQL cascade integration tests 均通过；没有删除 LIVE market event 或其他 decision。
+
+## 2026-09-07 · v0.2 freeze 与 SIDE-020
+
+- Freeze：将现有 paper estimate、PostgreSQL decision journal、+5m markout、shadow performance 与 price UI 基线统一标记为 package `0.2.0`；完整 typecheck、98 tests（另 1 个环境条件 PostgreSQL test skipped）和 production build 通过后，提交 `429824d`、tag `v0.2.0` 并创建 GitHub Release `SIDE v0.2`。
+- SIDE-020：新增独立 `@side/strategy-engine`，支持 edge 持续确认、首次/后续 size、interval/size multiplier、硬性段数/总仓位上限、basket 加权成本、对称 gross PnL、止盈/线性降至 0、止损、强退、pending price、cooldown 与 restart restore。
+- Edge：不修改冻结的 `s0-v1`；策略 edge 定义为同向 fresh quorum 的第三强绝对 price impulse。
+- Persistence/UI：新增不可变 config revision、run/basket/event journal 与 checkpoint；Cockpit 增加 DRY RUN ONLY 参数、active basket、配置历史和执行历史面板。
+- 一致性：单次 evaluation 的事件与最终 snapshot 原子提交；journal failure 后先恢复已提交状态再接受下一帧。event history 保存 delta，active restart 只读取 config + run snapshot，避免分段 history 平方增长或恢复时全表加载。
+- Replay：只按录制事件间隔推进策略；完成/停止后不再以 wall clock 重复最终 signal。`maxEntries` 硬上限为 100，全部 interval 与绝对 deadline 在改仓前验证。
+- 安全：自动策略使用理论即时成交，零手续费/滑点/partial fill；不调用交易接口，不包含 signer 或 broadcast path。
+- 验证：workspace typecheck 与 production build 通过；161 tests passed，3 个需要独立 `TEST_DATABASE_URL` 的 PostgreSQL tests 按环境跳过。
+
+## 2026-09-07 · SIDE-020 WebSocket resource controls
+
+- Dashboard footer 新增英文 `DISCONNECT ALL WS` 与 `RECONNECT ALL WS`，明确显示 CONNECTING、CONNECTED 或 PAUSED；Strategy 面板与 validation messages 也统一为英文。
+- 断开操作关闭所有 dashboard gateway WebSocket；LIVE 模式同时停止四组行情 adapters，并由 `PersistentSocket.stop()` 取消退避 timer，避免后台自动重连。
+- 重连操作先恢复 LIVE adapters，再创建新的 dashboard gateway WebSocket；REPLAY 模式只控制 dashboard gateway。
+- Dashboard gateway 对 server restart/瞬时断流加入 1/2/4/8/15 秒封顶的指数退避自动重连；人工全局断开使用 close code `4001`，明确进入 PAUSED 而不自动占用网络。
+- 策略状态、HTTP API、配置 revision 与执行 history 独立保留，不因 WS 断开而清空。
+- 验证：165 tests passed，3 个需要独立 `TEST_DATABASE_URL` 的 PostgreSQL tests 按环境跳过；workspace typecheck 与 production build 通过。
+
+## 2026-09-07 · Paper action quote TTL follow-up
+
+- 将 action-time preview 的默认 TTL 从 2 秒调整为 10 秒，与 5 秒自动 requote cadence 配套；正常情况下新报价会在旧报价过期前替换，并允许容忍一次刷新失败。
+- SELL 仍从 anchor 与 directional 两个必要请求中较早收到的一腿起算 TTL；超过 10 秒后服务端拒绝 record。
+- 首页共享 display snapshot 与 dry model 仍固定 `recordable=false`，本次调整不扩大其提交权限。
+
+## 2026-09-07 · Auto Strategy 独立页面与 Shadow Performance 复核
+
+- Auto Strategy 从主 Dashboard 移到独立 `/strategy` 页面；Dashboard 仅保留 `AUTO STRATEGY` 导航，不再加载策略配置/run/history 的每秒轮询。
+- 独立页面显示 LIVE/REPLAY、DRY RUN ONLY、market inputs 状态，并保留完整配置 revision、active basket 与 run/basket/event history。
+- Shadow Performance 当前保留：它评价人工 `PAPER BUY / SELL / WAIT` 的固定 +5m 方向 markout；Auto Strategy history 评价规则驱动的实际持仓生命周期，两者分别承担 signal validation 与 strategy simulation。
+- 退役条件：只有当产品取消人工 paper decision workflow 时，才连同 Shadow UI、journal API 和 markout worker 一起移除；新增 Auto Strategy 本身不足以证明它已无意义。
+- 验证：167 tests passed，3 个需要独立 `TEST_DATABASE_URL` 的 PostgreSQL tests 按环境跳过；workspace typecheck、web production build、LIVE Dashboard 与 `/strategy` browser smoke 均通过。
+
+## 2026-09-07 · Strategy run history readability follow-up
+
+- 将挤压的 basket cards 和无标题 event 流重构为 run columns、PnL summary、basket result table 与 latest-first event timeline；长 run ID 缩为可识别短码并保留完整值用于审计。
+- 新增 Total Theoretical PnL，口径固定为 closed basket gross PnL + open basket mark-to-market；同时拆分 Closed PnL、Open MTM、win/loss、entry fills 与 cumulative entry notional，未定价 basket 单独计数。
+- Basket table 独立显示 direction、exit reason、entry count、exposure、average entry、exit/current price、PnL bps 与 PnL USDC；take-profit、stop-loss、force-exit/manual-stop 分色，不把所有 closed basket 都显示为绿色。
+- 真实 run browser check：12 closed baskets、6 win / 6 loss、39 entry fills、$31,734.38 cumulative entry notional、Total Theoretical PnL `+$2.72`。
+- 验证：169 tests passed，3 个需要独立 `TEST_DATABASE_URL` 的 PostgreSQL tests 按环境跳过；workspace typecheck、production build 与 LIVE browser visual check 通过。
+
+## 2026-09-07 · v0.3 freeze
+
+- Freeze scope：以 `v0.2.0` 为基线，纳入 SIDE-020 dry-run strategy engine、PostgreSQL strategy journal/recovery、独立 `/strategy` 页面、PnL/history UI、WebSocket 资源控制与自动重连，以及 10 秒 paper action quote TTL。
+- Version：root、apps 与全部 workspace packages 统一升级为 `0.3.0`，release tag 使用 `v0.3.0`。
+- 安全边界：继续保持 dry-run only；没有 wallet、signer、transaction assembly、simulation、broadcast 或 live order submission path。
+- Release verification：169 tests passed，3 个需要独立 `TEST_DATABASE_URL` 的 PostgreSQL tests 按环境跳过；workspace typecheck、production build、LIVE browser smoke 与 PnL 汇总检查通过。

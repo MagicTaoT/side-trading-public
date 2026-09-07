@@ -1,5 +1,7 @@
 import websocket from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
+import type WebSocket from "ws";
+import { StrategyConfigError, type StrategyConfigV1, type StrategyObservation } from "@side/strategy-engine";
 import { LiveCoordinator } from "./live/coordinator.js";
 import { PaperEstimateBroker, PaperPolicyError } from "./paper/broker.js";
 import type { PaperAction, PaperProvider, PaperSide } from "./paper/contracts.js";
@@ -9,6 +11,12 @@ import { PaperPriceBoard } from "./paper/price-board.js";
 import { JupiterQuoteProvider, ReplayQuoteProvider, ZeroExQuoteProvider } from "./paper/providers.js";
 import { S0Runtime } from "./runtime.js";
 import type { RuntimeMode } from "./contracts.js";
+import { StrategyCoordinator, StrategyPolicyError, strategyObservation } from "./strategy/coordinator.js";
+import {
+  MemoryStrategyJournal,
+  StrategyJournalConflictError,
+  type StrategyJournal
+} from "./strategy/journal.js";
 
 export interface CreateAppOptions {
   replayJsonl: string;
@@ -27,6 +35,7 @@ export interface CreateAppOptions {
   };
   paperBroker?: PaperEstimateBroker;
   journal?: DecisionJournal;
+  strategyJournal?: StrategyJournal;
 }
 
 const MAX_SOCKET_BUFFER_BYTES = 256 * 1024;
@@ -55,10 +64,50 @@ function paperError(reply: { code(statusCode: number): { send(value: unknown): u
   return reply.code(500).send({ error: { code: "PAPER_BROKER_ERROR" } });
 }
 
+function strategyError(reply: { code(statusCode: number): { send(value: unknown): unknown } }, reason: unknown): unknown {
+  if (reason instanceof PaperPolicyError) {
+    return reply.code(reason.statusCode).send({ error: { code: reason.code } });
+  }
+  if (reason instanceof StrategyPolicyError) {
+    return reply.code(reason.statusCode).send({ error: { code: reason.code } });
+  }
+  if (reason instanceof StrategyConfigError) {
+    return reply.code(400).send({ error: { code: reason.code } });
+  }
+  if (reason instanceof StrategyJournalConflictError) {
+    const statusCode = reason.code === "CONFIG_REVISION_NOT_FOUND" || reason.code === "RUN_NOT_FOUND"
+      ? 404
+      : reason.code === "INVALID_STRATEGY_RECORD" || reason.code === "INVALID_STRATEGY_EVENT"
+        ? 400
+        : 409;
+    return reply.code(statusCode).send({ error: { code: reason.code } });
+  }
+  return reply.code(500).send({ error: { code: "STRATEGY_ERROR" } });
+}
+
+function boundedLimit(value: string | undefined, fallback: number, maximum: number): number {
+  const parsed = Number.parseInt(value ?? String(fallback), 10);
+  return Number.isSafeInteger(parsed) ? Math.min(maximum, Math.max(1, parsed)) : fallback;
+}
+
+function optionalStrategyId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const strategyId = value.trim();
+  if (!strategyId) throw new StrategyPolicyError(400, "INVALID_STRATEGY_ID");
+  return strategyId;
+}
+
 export async function createApp(options: CreateAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: options.logger ?? false });
   const mode = options.mode ?? "REPLAY";
   const runtime = new S0Runtime(options.replayJsonl, options.queueCapacity, mode, options.cexProfile ?? "coinbase");
+  const strategy = new StrategyCoordinator(options.strategyJournal ?? new MemoryStrategyJournal());
+  await strategy.initialize();
+  let lastReplayObservation: StrategyObservation | null = null;
+  const observeLiveStrategy = async (atMs = Date.now()) => {
+    const signal = runtime.snapshot().signal;
+    await strategy.evaluate(strategyObservation(signal, runtime.paperDryReference(atMs), atMs));
+  };
   const evidence = () => {
     const snapshot = runtime.snapshot();
     return { mode: snapshot.mode, signal: snapshot.signal, sources: snapshot.sources };
@@ -111,6 +160,21 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     : null;
   if (mode === "LIVE" && !live) throw new Error("LIVE mode requires live source configuration");
   let tickTimer: NodeJS.Timeout | null = null;
+  let websocketsEnabled = true;
+  const dashboardSockets = new Map<WebSocket, () => void>();
+
+  const websocketStatus = () => ({
+    enabled: websocketsEnabled,
+    mode,
+    dashboardClients: dashboardSockets.size,
+    liveSourcesEnabled: live !== null && websocketsEnabled
+  });
+  const removeDashboardSocket = (socket: WebSocket) => {
+    const disconnect = dashboardSockets.get(socket);
+    if (!disconnect) return;
+    dashboardSockets.delete(socket);
+    disconnect();
+  };
 
   await app.register(websocket);
 
@@ -118,10 +182,35 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   app.get("/health/ready", async () => ({
     status: "ready" as const,
     mode: runtime.snapshot().mode,
-    paperPersistence: paper.journal.persistence
+    paperPersistence: paper.journal.persistence,
+    strategyPersistence: strategy.journal.persistence
   }));
   app.get("/health/sources", async () => ({ mode: runtime.snapshot().mode, sources: runtime.snapshot().sources }));
   app.get("/api/state", async () => runtime.snapshot());
+  app.get("/api/websockets/status", async () => websocketStatus());
+  app.post("/api/websockets/disconnect", async () => {
+    const wasEnabled = websocketsEnabled;
+    websocketsEnabled = false;
+    if (wasEnabled) live?.stop();
+    const sockets = [...dashboardSockets.keys()];
+    for (const socket of sockets) {
+      removeDashboardSocket(socket);
+      if (socket.readyState === socket.OPEN || socket.readyState === socket.CONNECTING) {
+        socket.close(4001, "all websockets disconnected by operator");
+      }
+    }
+    return {
+      accepted: true,
+      disconnectedDashboardClients: sockets.length,
+      ...websocketStatus()
+    };
+  });
+  app.post("/api/websockets/reconnect", async () => {
+    const wasEnabled = websocketsEnabled;
+    websocketsEnabled = true;
+    if (!wasEnabled) live?.start();
+    return { accepted: true, ...websocketStatus() };
+  });
   app.get("/api/paper-prices", async (_request, reply) => {
     try {
       return reply.send({ prices: await paperPrices.current() });
@@ -196,10 +285,109 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   app.get("/api/shadow-performance", async () => ({ performance: await paper.performance() }));
 
+  app.post("/api/paper-strategy-configs", { bodyLimit: 16 * 1024 }, async (request, reply) => {
+    try {
+      const body = object(request.body);
+      const strategyId = body.strategyId ?? null;
+      if (strategyId !== null && typeof strategyId !== "string") {
+        throw new StrategyPolicyError(400, "INVALID_STRATEGY_ID");
+      }
+      const config = object(body.config) as unknown as StrategyConfigV1;
+      return reply.code(201).send({ config: await strategy.saveConfig(config, strategyId) });
+    } catch (reason) {
+      return strategyError(reply, reason);
+    }
+  });
+
+  app.get<{ Querystring: { limit?: string; strategyId?: string } }>("/api/paper-strategy-configs", async (request, reply) => {
+    try {
+      return reply.send({
+        configs: await strategy.listConfigs(
+          boundedLimit(request.query.limit, 50, 200),
+          optionalStrategyId(request.query.strategyId)
+        )
+      });
+    } catch (reason) {
+      return strategyError(reply, reason);
+    }
+  });
+
+  app.get("/api/paper-strategy-runs/active", async () => ({ run: strategy.activeRun() }));
+
+  app.post("/api/paper-strategy-runs", { bodyLimit: 8 * 1024 }, async (request, reply) => {
+    try {
+      const body = object(request.body);
+      if (typeof body.strategyId !== "string") throw new StrategyPolicyError(400, "INVALID_STRATEGY_ID");
+      const revision = body.revision === undefined ? undefined : Number(body.revision);
+      if (revision !== undefined && (!Number.isSafeInteger(revision) || revision < 1)) {
+        throw new StrategyPolicyError(400, "INVALID_STRATEGY_REVISION");
+      }
+      const run = await strategy.start(body.strategyId, revision);
+      return reply.code(201).send({ run });
+    } catch (reason) {
+      return strategyError(reply, reason);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/paper-strategy-runs/:id/stop", async (request, reply) => {
+    try {
+      const active = strategy.activeRun();
+      const atMs = mode === "REPLAY"
+        ? active?.snapshot.evaluatedAtMs ?? active?.startedAtMs ?? 0
+        : Date.now();
+      const signal = runtime.snapshot().signal;
+      const referenceAtMs = mode === "REPLAY" ? signal.evaluatedAtMs : atMs;
+      const observation = mode === "REPLAY" && lastReplayObservation
+        ? { ...lastReplayObservation, atMs }
+        : strategyObservation(signal, runtime.paperDryReference(referenceAtMs), atMs);
+      return reply.send({ run: await strategy.stop(request.params.id, observation) });
+    } catch (reason) {
+      return strategyError(reply, reason);
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { eventLimit?: string } }>("/api/paper-strategy-runs/:id", async (request, reply) => {
+    const detail = await strategy.runDetail(request.params.id, boundedLimit(request.query.eventLimit, 500, 999));
+    return detail ? reply.send(detail) : reply.code(404).send({ error: { code: "STRATEGY_RUN_NOT_FOUND" } });
+  });
+
+  app.get<{ Querystring: { limit?: string; strategyId?: string } }>("/api/paper-strategy-runs", async (request, reply) => {
+    try {
+      return reply.send({
+        runs: await strategy.listRuns(
+          boundedLimit(request.query.limit, 20, 100),
+          optionalStrategyId(request.query.strategyId)
+        )
+      });
+    } catch (reason) {
+      return strategyError(reply, reason);
+    }
+  });
+
   app.post("/api/replay/start", async (_request, reply) => {
     if (mode === "LIVE") return reply.code(409).send({ accepted: false, reason: "replay_disabled_in_live_mode" });
-    const snapshot = runtime.startReplay();
-    return reply.send({ accepted: true, snapshot });
+    const active = strategy.activeRun();
+    if (active && active.snapshot.evaluatedAtMs !== active.startedAtMs) {
+      return reply.code(409).send({ accepted: false, reason: "active_strategy_already_consumed_replay" });
+    }
+    try {
+      const observations: ReturnType<typeof strategyObservation>[] = [];
+      lastReplayObservation = null;
+      const snapshot = runtime.startReplay(({ elapsedMs, referenceAtMs }) => {
+        if (!active) return;
+        const observation = strategyObservation(
+          runtime.snapshot().signal,
+          runtime.paperDryReference(referenceAtMs),
+          active.startedAtMs + elapsedMs
+        );
+        lastReplayObservation = observation;
+        observations.push(observation);
+      });
+      for (const observation of observations) await strategy.evaluate(observation);
+      return reply.send({ accepted: true, snapshot });
+    } catch (reason) {
+      return strategyError(reply, reason);
+    }
   });
 
   app.post("/api/replay/stop", async (_request, reply) => {
@@ -209,6 +397,10 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   });
 
   app.get("/ws", { websocket: true }, (socket) => {
+    if (!websocketsEnabled) {
+      socket.close(4001, "websockets paused by operator");
+      return;
+    }
     const disconnect = runtime.connect((serialized) => {
       if (socket.readyState !== socket.OPEN) return;
       if (socket.bufferedAmount > MAX_SOCKET_BUFFER_BYTES) {
@@ -217,15 +409,20 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       }
       socket.send(serialized);
     });
-    socket.on("close", disconnect);
-    socket.on("error", disconnect);
+    dashboardSockets.set(socket, disconnect);
+    socket.on("close", () => removeDashboardSocket(socket));
+    socket.on("error", () => removeDashboardSocket(socket));
   });
 
   app.addHook("onReady", async () => {
     live?.start();
     markoutWorker.start();
     if (live) {
-      tickTimer = setInterval(() => runtime.tick(Date.now()), 1_000);
+      tickTimer = setInterval(() => {
+        const atMs = Date.now();
+        runtime.tick(atMs);
+        void observeLiveStrategy(atMs).catch((reason) => app.log.error({ err: reason }, "Strategy evaluation failed"));
+      }, 1_000);
       tickTimer.unref();
     }
   });
@@ -233,6 +430,8 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     if (tickTimer) clearInterval(tickTimer);
     markoutWorker.stop();
     live?.stop();
+    for (const socket of dashboardSockets.keys()) removeDashboardSocket(socket);
+    await strategy.close();
     await paper.journal.close();
   });
 

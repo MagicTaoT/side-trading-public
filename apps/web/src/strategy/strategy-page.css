@@ -1,0 +1,118 @@
+.page-nav-link {
+  min-height: 29px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: #aeb7bc;
+  background: rgba(10, 15, 18, .72);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.page-nav-link:hover,
+.page-nav-link.active {
+  color: var(--cyan);
+  border-color: #1b626b;
+  background: rgba(73, 217, 232, .08);
+}
+
+.brand-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.strategy-page-shell {
+  width: min(1440px, calc(100% - 40px));
+}
+
+.strategy-page-topbar {
+  min-height: 66px;
+}
+
+.page-navigation {
+  flex-wrap: wrap;
+}
+
+.strategy-input-state {
+  display: inline-flex;
+  min-height: 29px;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: #a9b2b7;
+  font-size: 9px;
+  letter-spacing: .1em;
+  white-space: nowrap;
+}
+
+.strategy-input-state i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #667078;
+}
+
+.strategy-input-state.active i {
+  background: var(--buy);
+  box-shadow: 0 0 10px rgba(168, 231, 70, .68);
+}
+
+.strategy-input-state.paused i,
+.strategy-input-state.error i {
+  background: var(--sell);
+}
+
+.strategy-page-intro {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 30px;
+  padding: 24px 2px 4px;
+}
+
+.strategy-page-intro h1 {
+  margin: 5px 0 0;
+  font-size: clamp(24px, 3vw, 39px);
+  letter-spacing: .04em;
+}
+
+.strategy-page-intro p {
+  width: min(620px, 52%);
+  margin: 0;
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.strategy-page-shell .strategy-panel {
+  margin-top: 18px;
+}
+
+.strategy-page-footer {
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 760px) {
+  .strategy-page-shell {
+    width: min(100% - 20px, 720px);
+  }
+
+  .strategy-page-intro {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .strategy-page-intro p {
+    width: 100%;
+  }
+
+  .page-navigation {
+    justify-content: flex-start;
+  }
+}

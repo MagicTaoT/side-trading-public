@@ -3,7 +3,7 @@ import type { RuntimeMode, SourceRuntimeState } from "../contracts.js";
 
 export const PAPER_PAIR = "SOL-USDC" as const;
 export const PAPER_NOTIONAL_QUOTE = "10000" as const;
-export const PAPER_PREVIEW_TTL_MS = 2_000 as const;
+export const PAPER_PREVIEW_TTL_MS = 10_000 as const;
 export const PAPER_PRICE_REFRESH_MS = 5_000 as const;
 export const PAPER_PRICE_STALE_MS = 12_000 as const;
 export const PAPER_DRY_HALF_SPREAD_BPS = 50 as const;

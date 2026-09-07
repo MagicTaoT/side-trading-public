@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 
 const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+const strategyPage = readFileSync(new URL("./strategy/StrategyPage.tsx", import.meta.url), "utf8");
+const strategyPageCss = readFileSync(new URL("./strategy/strategy-page.css", import.meta.url), "utf8");
+const strategyPanel = readFileSync(new URL("./strategy/StrategyPanel.tsx", import.meta.url), "utf8");
+const strategyHistoryCss = readFileSync(new URL("./strategy/strategy-history.css", import.meta.url), "utf8");
 const verdictCardBlock = css.match(/\.verdict-card\s*\{([^}]*)\}/)?.[1] ?? "";
 
 describe("cockpit responsive contract", () => {
@@ -61,6 +65,20 @@ describe("cockpit responsive contract", () => {
     expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*?\.shadow-metrics\s*\{[\s\S]*?repeat\(2/);
   });
 
+  it("keeps auto strategy on a dedicated page instead of the market dashboard", () => {
+    expect(app).not.toContain("<StrategyPanel");
+    expect(app).toContain('href="/strategy">AUTO STRATEGY</a>');
+    expect(app).toContain('path === "/strategy" ? <StrategyPage /> : <DashboardPage />');
+    expect(strategyPage).toContain("<StrategyPanel mode={runtime.mode} />");
+    expect(strategyPage).toContain('href="/">MARKET DASHBOARD</a>');
+    expect(strategyPageCss).toContain(".strategy-page-shell");
+    expect(strategyPanel).toContain("TOTAL THEORETICAL PNL");
+    expect(strategyPanel).toContain('aria-label="Basket result table"');
+    expect(strategyPanel).toContain('aria-label="Run event table"');
+    expect(strategyHistoryCss).toContain(".strategy-pnl-summary");
+    expect(strategyHistoryCss).toContain(".strategy-event-scroll");
+  });
+
   it("exposes detailed bubble evidence on pointer or keyboard focus", () => {
     expect(app).toContain("bubbleAuditLabel(event, evaluatedAtMs)");
     expect(app).toContain("onPointerEnter");
@@ -81,5 +99,17 @@ describe("cockpit responsive contract", () => {
     expect(app).toContain('method: "DELETE"');
     expect(app).toContain('deleteCandidate === order.orderId ? "CONFIRM" : "DELETE"');
     expect(css).toContain(".decision-delete.confirm");
+  });
+
+  it("keeps reversible WebSocket resource controls at the bottom of the dashboard", () => {
+    expect(app).toContain('fetch(`/api/websockets/${action}`, { method: "POST" })');
+    expect(app).toContain("DISCONNECT ALL WS");
+    expect(app).toContain("RECONNECT ALL WS");
+    expect(app).toMatch(/<footer>[\s\S]*?className="websocket-controls"[\s\S]*?<\/footer>/);
+    expect(css).toContain(".websocket-button.disconnect");
+    expect(css).toContain(".websocket-button.reconnect");
+    expect(app).toMatch(/setConnection\("RECONNECTING"\)[\s\S]*?setWebsocketGeneration/);
+    expect(app).toContain("event.code === 4001");
+    expect(css).toContain(".connection-state.reconnecting i");
   });
 });

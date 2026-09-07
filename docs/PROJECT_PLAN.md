@@ -2,7 +2,7 @@
 
 > 工作定义：**See what the market is actually saying - and where it disagrees.**
 
-状态：规划基线 v0.2；SIDE-001 至 SIDE-005、SIDE-010、SIDE-011、SIDE-016 complete；SIDE-006 local required gates complete / target AWS gate blocked；SIDE-007 至 SIDE-009 runtime adapters 已接入但 R1 完整退出门未完成；R0 REPLAY RUNNABLE；S0 产品版本 in execution
+状态：v0.3 已冻结发布；SIDE-001 至 SIDE-005、SIDE-010、SIDE-011、SIDE-016、SIDE-020 complete；SIDE-006 local required gates complete / target AWS gate blocked；SIDE-007 至 SIDE-009 runtime adapters 已接入但 R1 完整退出门未完成；R0 REPLAY RUNNABLE；S0 产品版本 in execution
 日期：2026-09-07
 目标市场：SOL only
 核心决策周期：未来 5 分钟（MVP 唯一窗口）
@@ -70,7 +70,7 @@ SIDE 帮助 SOL 交易者判断短窗口内的方向、一致性和等待时机�
 - TradingView 替代品、K 线工作台、RSI/MACD；
 - 新闻、社交情绪、prediction market；
 - LLM 生成买卖建议；
-- 自动策略、杠杆设置、仓位管理；
+- 真实自动下单、杠杆设置与账户级仓位管理；SIDE-020 仅提供隔离的 dry-run 策略/basket 模拟；
 - CEX 或 Hyperliquid 真实下单；
 - maker queue 的虚假 paper fill；
 - 任何要求服务端保存用户钱包私钥的流程。
@@ -132,6 +132,7 @@ S0 的“双向 $10k paper estimate”使用明确且可重放的 exact-in 口�
 | M0-08 | Paper/shadow evaluation | 0x reference、+5m markout、gross/net、sample size 与 unscored |
 | M0-09 | AWS hardening | HTTPS、source health、structured logs、备份、重启恢复、secret 管理 |
 | M0-10 | Stablecoin basis gate | USDT 数据进入 verdict 前必须完成 USDC/USDT basis 定义、freshness 与异常保护；否则只作旁路显示 |
+| M0-11 | Dry-run 自动策略 | edge 持续确认、可选分段 multiplier、单 basket 生命周期、线性止盈/止损/强退、配置 revision 与执行 history；不提交真实订单 |
 
 ### M1 - 产品化补强
 

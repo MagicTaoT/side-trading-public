@@ -70,6 +70,7 @@ main {
 .connection-state { color: #a9b2b7; }
 .connection-state i, .source-pill i { width: 6px; height: 6px; border-radius: 50%; background: #667078; }
 .connection-state.connected i, .source-pill.fresh i { background: var(--buy); box-shadow: 0 0 10px rgba(168, 231, 70, .68); }
+.connection-state.reconnecting i { background: var(--warning); box-shadow: 0 0 10px rgba(244, 182, 63, .5); }
 .connection-state.disconnected i, .source-pill.stale i, .source-pill.gap i { background: var(--sell); }
 .connection-state { display: inline-flex; align-items: center; gap: 7px; }
 .quality-state.fresh { color: var(--buy); }
@@ -442,6 +443,25 @@ main {
 .source-pill { display: inline-flex; align-items: center; gap: 7px; padding: 8px 9px; border: 1px solid var(--line); color: #a7b0b5; font-size: 8px; letter-spacing: .08em; }
 .source-coverage p { width: min(420px, 36%); margin: 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
 footer { justify-content: space-between; gap: 20px; padding: 15px 2px 0; color: #5e6a71; font-size: 8px; letter-spacing: .1em; }
+.footer-runtime { display: flex; flex-direction: column; gap: 6px; }
+.websocket-controls { display: flex; align-items: center; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
+.websocket-controls > span { color: var(--muted); white-space: nowrap; }
+.websocket-button {
+  min-height: 30px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: #aeb7bc;
+  background: #10161a;
+  cursor: pointer;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+.websocket-button.disconnect { border-color: #59342f; color: #d7867a; }
+.websocket-button.reconnect { border-color: #31534a; color: #8ed9bd; }
+.websocket-button:hover:not(:disabled) { color: #fff; border-color: currentColor; }
+.websocket-button:disabled { opacity: .38; cursor: not-allowed; }
 
 .drawer-layer { position: fixed; inset: 0; z-index: 20; display: flex; justify-content: flex-end; background: rgba(0,0,0,.67); backdrop-filter: blur(5px); animation: veil-in .2s ease-out; }
 .paper-drawer {
@@ -570,6 +590,7 @@ details ul { margin: 0; padding: 4px 28px 13px; color: var(--muted-2); font-size
   .unscored-strip { grid-template-columns: 1fr; }
   .source-coverage { gap: 14px; }
   footer { align-items: flex-start; flex-direction: column; }
+  .websocket-controls { width: 100%; justify-content: flex-start; }
   .paper-drawer { padding: 18px 14px; }
 }
 

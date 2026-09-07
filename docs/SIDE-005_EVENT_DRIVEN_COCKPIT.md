@@ -36,9 +36,11 @@
 - `minPx`、`maxPx`；
 - 已存在的 count、buy/sell count、buy/sell/max notional 由 runtime 填充。
 
-event rail 按 `zone + source + venue + instrument + quote + kind` 做 75 ms 分桶。不同 venue 不合并；混合方向保留 buy/sell 两侧数据并显示为 flat，而不是只保留净方向。成交 bubble 另按 side-specific lane 分桶，以首个 canonical event id 作为稳定视觉身份：首次入场播放一次 0.8 秒、继承 BUY/SELL 颜色的外扩高光圈。用户可独立选择 30s、60s、3m 或 5m 的 bubble visual window（默认 60s）；opacity 在所选窗口的前半段由 85% 降至 30%，随后在窗口边界前降至 10%，到期移除。切换窗口只改变视觉留存，不改变 30 秒 signal/verdict 或 5 分钟 realized-flow 布局口径。高频非成交 state event 继续受每 zone 50-event hard bound 约束。
+event rail 按 `zone + source + venue + instrument + quote + kind` 做 75 ms 分桶。不同 venue 不合并；混合方向保留 buy/sell 两侧数据并显示为 flat，而不是只保留净方向。成交 bubble 另按 side-specific lane 分桶，以首个 canonical event id 作为稳定视觉身份：首次入场播放一次 0.8 秒、继承 BUY/SELL 颜色的外扩高光圈。Bitquery 的高频 DEX 流采用额外的纯视觉压缩：低于 `$1,000` 的 swap 按固定 1 秒、instrument 与 side 跨协议合并成 `DEX FLOW ×N`，保留双边 count/notional、最大单笔、价格与时间范围；达到 `$1,000` 的 material swap 保留 canonical event id 并独立显示。原始 swap 仍逐笔进入 signal、5 分钟 flow、reference 与审计链路。用户可独立选择 30s、60s、3m 或 5m 的 bubble visual window（默认 60s）；opacity 在所选窗口的前半段由 85% 降至 30%，随后在窗口边界前降至 10%，到期移除。切换窗口只改变视觉留存，不改变 30 秒 signal/verdict 或 5 分钟 realized-flow 布局口径。高频非成交 state event 继续受每 zone 50-event hard bound 约束。
 
 布局采用分层 volume 权重：Spot/Perp 保持等高以便比较；每行 BUY/SELL 按该 market 的 5m realized volume 分配宽度并 clamp 到 35%–65%；每个象限内的两个 source panel 再按各自 volume 分配宽度并 clamp 到 30%–70%。比例量化到 0.5 percentage point，并使用平滑 CSS transition，避免逐笔微小变化造成视觉抖动。verdict bar 位于 SPOT 与 PERP 行之间的正常文档流中，始终全宽且不随分界线移动。
+
+Bubble 坐标由 event id 经独立的 32-bit avalanche mixing 生成 X/Y 序列，禁止从同一 hash 的重叠位段直接取坐标，以免结构相似的 Bitquery bucket id 形成对角线相关。边缘留白按 bubble 直径动态计算：小 bubble 使用更大可用区域，大 bubble 保留足够裁切安全区；相同 event id 的 replay 坐标仍完全可复现。
 
 ## 4. Paper drawer 真值边界
 

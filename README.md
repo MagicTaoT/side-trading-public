@@ -17,6 +17,8 @@ SIDE 面向主动 SOL 交易者，汇总中心化交易所和 DeFi 的现货、�
 - [SIDE-010 Paper estimate broker](docs/SIDE-010_PAPER_ESTIMATE_BROKER.md)
 - [SIDE-011 Decision journal 与 +5m markout](docs/SIDE-011_DECISION_JOURNAL_MARKOUT.md)
 - [SIDE-016 Shadow performance 与 decision history UI](docs/SIDE-016_SHADOW_PERFORMANCE_UI.md)
+- [SIDE-020 Dry-run 自动策略、basket 与历史](docs/SIDE-020_DRY_RUN_AUTO_STRATEGY.md)
+- [SIDE v0.3 release notes](docs/RELEASE_v0.3.0.md)
 - [更新后的 S0 可运行 Product Slice](docs/S0_RUNNABLE_PRODUCT_SLICE.md)
 - [Process log](PROCESS_LOG.md)
 - [主 Cockpit 视觉方向](ui-concepts/side-cockpit-v3.png)
@@ -28,7 +30,7 @@ SIDE 面向主动 SOL 交易者，汇总中心化交易所和 DeFi 的现货、�
 - 市场判断与模拟验证版：真实公开行情 + 本地 paper execution；不使用真实资金，不签名，不广播，不上链。
 - S0 CEX：Coinbase `SOL-USD` spot；CEX perp 同时接 Coinbase Derivatives `SLP` 与 Kraken Futures `PF_SOLUSD`。Binance spot/perp 保留为经过部署区域 preflight 后才启用的候选源。
 - S0 DEX flow：Bitquery WSOL/USDC decoded realized swaps；明确展示 coverage，不声称 Solana 全市场。
-- 0x Solana：首页在打开期间按服务端共享的 5 秒节奏显示双向 $10k estimate；点击 paper action 后另取 2 秒 TTL 的新报价用于 record，全程不提交交易。
+- 0x Solana：首页在打开期间按服务端共享的 5 秒节奏显示双向 $10k estimate；点击 paper action 后另取 10 秒 TTL 的新报价用于 record，全程不提交交易。
 - Jupiter：仅在 0x 失败且用户明确选择后作为 paper estimate fallback，不作 S0 连续行情或 DEX 成交流。
 - 产品延伸版：真实 0x Solana swap 作为 feature-gated 模块，使用用户钱包本地签名；绝不把 Solana 私钥交给服务端。
 - 首页：event-driven，而不是定时快照。每个进入可视层的标准化事件都有对应区域的局部反馈；bursty event 以 75 ms visual micro-batch 呈现并显示事件数，避免视觉噪声。
@@ -58,4 +60,4 @@ pnpm preflight:s0 -- --region us-east-1 --samples 5 --out-dir reports/preflight/
 
 本地凭据的固定位置是 [`.env.preflight.local`](.env.preflight.local)，格式参考 [`.env.preflight.example`](.env.preflight.example)。CLI 会自动读取该文件；它已被 Git 忽略并设置为仅当前用户可读写。也可用 `--env-file <path>` 显式指定其他位置。必填凭据为 `BITQUERY_TOKEN`、`ZEROEX_API_KEY`；只有显式验证 Jupiter fallback 时才同时提供 `JUPITER_API_KEY` 和 `--include-jupiter`。secret 值不会进入报告。
 
-当前已完成 SIDE-002 foundation、SIDE-003 runtime spine、SIDE-004 deterministic signal engine、SIDE-005 event-driven cockpit、SIDE-010 paper estimate broker、SIDE-011 PostgreSQL decision journal/+5m markout 与 SIDE-016 shadow performance UI。SIDE-006 的[本机 required strict 报告](reports/preflight/local-required-pass-2026-09-05/source-preflight.md) 已以退出码 0 选择 Coinbase，并连续验证 Hyperliquid、Bitquery 与 0x；显式 Jupiter 检查因当前 key 返回 401 而单独失败。产品 runtime 现已接入本地真实 Coinbase spot/SLP、Kraken Futures `PF_SOLUSD`、Hyperliquid 与 Bitquery WebSocket，页面明确显示 `LIVE`，心跳不生成成交粒子，Bitquery 同签名 route legs 合并为单一净经济成交。目标 AWS SSH 入口仍超时，所以 SIDE-006 的目标部署 gate 继续 blocked；Bitquery historical backfill/checkpoint 也仍是 R1 完整退出门。首页的 PAPER BUY/SELL 直接显示共享 5 秒 0x 双向 estimate；429 时退避 30 秒，并以明确不可执行的 Bitquery（优先）或 Coinbase USD ±50bp dry model 保持 paper context。点击后仍请求独立的 2 秒 TTL action-time quote；Jupiter 只允许用户携带 0x failure id 显式触发。record 以事务写入 PostgreSQL，并由可重启、幂等的 worker 生成 +5m scored/unscored markout。首页常驻读取 journal history 与 shadow-performance aggregate，WAIT 和其他 unscored 结果不进入胜率。
+当前已完成 SIDE-002 foundation、SIDE-003 runtime spine、SIDE-004 deterministic signal engine、SIDE-005 event-driven cockpit、SIDE-010 paper estimate broker、SIDE-011 PostgreSQL decision journal/+5m markout、SIDE-016 shadow performance UI，以及 SIDE-020 dry-run 自动策略。SIDE-020 在独立的 `/strategy` 页面提供 edge 门槛、持续确认、分段 interval/size multiplier（最多 100 段）、basket 管理、线性递减止盈、止损、强退、不可变配置版本与执行历史；主 Dashboard 只保留页面入口。事件与 snapshot 原子落盘，服务重启可恢复。REPLAY 只由录制时间轴推进，LIVE 才按 tick 运行。它只使用理论即时成交，不调用 0x 下单，也没有 signer/broadcast path。SIDE-006 的[本机 required strict 报告](reports/preflight/local-required-pass-2026-09-05/source-preflight.md) 已以退出码 0 选择 Coinbase，并连续验证 Hyperliquid、Bitquery 与 0x；显式 Jupiter 检查因当前 key 返回 401 而单独失败。产品 runtime 现已接入本地真实 Coinbase spot/SLP、Kraken Futures `PF_SOLUSD`、Hyperliquid 与 Bitquery WebSocket，页面明确显示 `LIVE`，心跳不生成成交粒子，Bitquery 同签名 route legs 合并为单一净经济成交。目标 AWS SSH 入口仍超时，所以 SIDE-006 的目标部署 gate 继续 blocked；Bitquery historical backfill/checkpoint 也仍是 R1 完整退出门。首页的 PAPER BUY/SELL 直接显示共享 5 秒 0x 双向 estimate；429 时退避 30 秒，并以明确不可执行的 Bitquery（优先）或 Coinbase USD ±50bp dry model 保持 paper context。点击后仍请求独立的 10 秒 TTL action-time quote；Jupiter 只允许用户携带 0x failure id 显式触发。record 以事务写入 PostgreSQL，并由可重启、幂等的 worker 生成 +5m scored/unscored markout。首页常驻读取 journal history 与 shadow-performance aggregate，WAIT 和其他 unscored 结果不进入胜率。

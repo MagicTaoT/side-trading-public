@@ -1,6 +1,6 @@
 # SIDE - 技术架构与数据接入规范
 
-状态：规划基线 v0.2；SIDE-001 source decision frozen
+状态：运行基线 v0.3；SIDE-001 source decision frozen
 日期：2026-09-04
 原则：单机可部署、模块可替换、事件可回放、信号可解释、执行默认 fail-closed。
 
@@ -80,6 +80,7 @@ packages/
   venue-bitquery-solana/  S0 decoded WSOL/USDC economic swaps
   venue-solana-dex/       M0 direct selected-pool/program swap ingest
   signal-engine/          rolling windows, jury, verdict, model version
+  strategy-engine/        deterministic dry-run entry/scale/basket/exit state machine
   execution-paper/        preview, record, markout
   quote-zeroex/           typed 0x client used by paper preview; no signer/send
   quote-jupiter/          explicit paper fallback only; no signer/send
@@ -90,6 +91,8 @@ infra/
   caddy/
 docs/
 ```
+
+SIDE-020 在 signal 与 execution 之间增加独立的策略 adapter/coordinator：adapter 将离散 verdict 映射成 versioned scalar edge，`@side/strategy-engine` 只接收 observation 并保持确定性状态，server coordinator 负责理论参考价、单 active run、原子 event batch、无事件 checkpoint、失败后 journal reconciliation 与轻量 restart recovery。REPLAY 只按录制事件间隔驱动，完成后的冻结 signal 不再被 wall clock 重采样；LIVE 才使用每秒 tick。event journal 保存 delta，完整 basket 独立持久化。它不复用人工 `PaperEstimateBroker`，因此未来将理论价替换为 perp depth/limit execution adapter 时，不会改变现有 0x preview/record 安全边界。首版假设单 server process；多副本执行前仍需增加 worker lease。
 
 建议库类别而非固定版本：React、TypeScript、Fastify、原生 WebSocket client、Zod/Valibot 一类 schema validator、Decimal.js 一类十进制定点库、PostgreSQL。版本在 scaffold 时锁定并提交 lockfile。
 
@@ -602,7 +605,7 @@ POST /api/paper-orders/preview
   -> never assemble, sign, simulate, or send a transaction
 ```
 
-服务端记录 0x 原始响应的 hash 与必要字段，避免在日志里写 API key。若 0x 调用失败，UI 明确显示 unavailable 或不可执行的 dry model；只有用户明确调用 fallback action 时才请求 Jupiter estimate，不能由 server 静默切换。Jupiter 必须复用相同 BUY 或 SELL anchor + directional request 口径，且将 `provider="jupiter"` 与 0x 失败原因写入 preview。`previewId` 的 2 秒有效期是 SIDE 的本地风险政策，不是任一 provider 的锁价或 API expiry；record 时仍需复核 server-side policy、pair、notional 与 source health。首页 5 秒 display snapshot 不携带可提交资格。
+服务端记录 0x 原始响应的 hash 与必要字段，避免在日志里写 API key。若 0x 调用失败，UI 明确显示 unavailable 或不可执行的 dry model；只有用户明确调用 fallback action 时才请求 Jupiter estimate，不能由 server 静默切换。Jupiter 必须复用相同 BUY 或 SELL anchor + directional request 口径，且将 `provider="jupiter"` 与 0x 失败原因写入 preview。`previewId` 的 10 秒有效期是 SIDE 的本地风险政策，不是任一 provider 的锁价或 API expiry；record 时仍需复核 server-side policy、pair、notional 与 source health。首页 5 秒 display snapshot 不携带可提交资格。
 
 ### 5.3 真实 swap 延伸版
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { UiEvent } from "@side/market-core";
 import type { JurySnapshot, S0Segment, SignalSnapshot, Verdict } from "@side/signal-engine";
 import {
@@ -24,6 +24,7 @@ import {
   type PaperPerformanceSummary,
   type PaperProvider
 } from "./performance.js";
+import { StrategyPage } from "./strategy/StrategyPage.js";
 
 interface SourceState {
   provider: string;
@@ -830,7 +831,7 @@ function PaperDrawer({ action, mode, freshJuryCount, onClose, onRecorded }: Pape
             <div><span>PAIR</span><strong>SOL-USDC</strong></div>
             <div><span>NOTIONAL</span><strong>$10,000 USDC</strong></div>
             <div><span>PROVIDER</span><strong>{preview ? providerLabel : "REQUESTING"}</strong></div>
-            <div><span>QUOTE AGE / TTL</span><strong>{quoteAgeMs === null ? "—" : `${(quoteAgeMs / 1_000).toFixed(1)}S / 2.0S`}</strong></div>
+            <div><span>QUOTE AGE / TTL</span><strong>{quoteAgeMs === null ? "—" : `${(quoteAgeMs / 1_000).toFixed(1)}S / 10.0S`}</strong></div>
             {action === "SELL" ? <div><span>ANCHOR-DERIVED INPUT</span><strong>{preview?.inputAmountSOL ? `${Number(preview.inputAmountSOL).toFixed(4)} SOL` : "—"}</strong></div> : null}
             <div className="emphasis-row"><span>ESTIMATED OUTPUT</span><strong>{pending ? "REQUESTING" : output}</strong></div>
             <div><span>MINIMUM OUTPUT</span><strong>{minimumOutput}</strong></div>
@@ -852,9 +853,9 @@ function PaperDrawer({ action, mode, freshJuryCount, onClose, onRecorded }: Pape
   );
 }
 
-export function App() {
+function DashboardPage() {
   const [snapshot, setSnapshot] = useState(initialSnapshot);
-  const [connection, setConnection] = useState<"CONNECTING" | "CONNECTED" | "DISCONNECTED">("CONNECTING");
+  const [connection, setConnection] = useState<"CONNECTING" | "CONNECTED" | "RECONNECTING" | "DISCONNECTED">("CONNECTING");
   const [error, setError] = useState<string | null>(null);
   const [motionPaused, setMotionPaused] = useState(false);
   const [pageHidden, setPageHidden] = useState(false);
@@ -869,6 +870,10 @@ export function App() {
   const [paperPriceClockMs, setPaperPriceClockMs] = useState(Date.now());
   const [visualWindowMs, setVisualWindowMs] = useState<VisualWindowMs>(60_000);
   const [windowSwitching, setWindowSwitching] = useState(true);
+  const [websocketsEnabled, setWebsocketsEnabled] = useState(true);
+  const [websocketGeneration, setWebsocketGeneration] = useState(0);
+  const [websocketAction, setWebsocketAction] = useState<"disconnect" | "reconnect" | null>(null);
+  const websocketRetryAttempt = useRef(0);
 
   const loadSnapshot = useCallback(async () => {
     const response = await fetch("/api/state");
@@ -947,9 +952,15 @@ export function App() {
   }, [loadPaperPrices]);
 
   useEffect(() => {
+    if (!websocketsEnabled) {
+      websocketRetryAttempt.current = 0;
+      setConnection("DISCONNECTED");
+      return;
+    }
     let active = true;
     const pendingEvents: UiEvent[] = [];
     let flushTimer: number | undefined;
+    let reconnectTimer: number | undefined;
     const flushPendingEvents = () => {
       flushTimer = undefined;
       const pending = pendingEvents.splice(0);
@@ -965,11 +976,32 @@ export function App() {
     };
 
     void loadSnapshot().catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : String(reason)); });
+    setConnection("CONNECTING");
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    socket.addEventListener("open", () => { if (active) { setConnection("CONNECTED"); setError(null); } });
-    socket.addEventListener("close", () => { if (active) setConnection("DISCONNECTED"); });
-    socket.addEventListener("error", () => { if (active) setError("WebSocket connection failed"); });
+    socket.addEventListener("open", () => {
+      if (!active) return;
+      websocketRetryAttempt.current = 0;
+      setConnection("CONNECTED");
+      setError(null);
+    });
+    socket.addEventListener("close", (event) => {
+      if (!active) return;
+      if (event.code === 4001) {
+        websocketRetryAttempt.current = 0;
+        setWebsocketsEnabled(false);
+        setConnection("DISCONNECTED");
+        return;
+      }
+      const attempt = websocketRetryAttempt.current++;
+      const delayMs = Math.min(15_000, 1_000 * 2 ** Math.min(attempt, 4));
+      setConnection("RECONNECTING");
+      reconnectTimer = window.setTimeout(() => {
+        if (!active) return;
+        setWebsocketGeneration((current) => current + 1);
+      }, delayMs);
+    });
+    socket.addEventListener("error", () => { if (active) setConnection("RECONNECTING"); });
     socket.addEventListener("message", ({ data }) => {
       if (!active) return;
       try {
@@ -985,8 +1017,13 @@ export function App() {
         }
       } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     });
-    return () => { active = false; if (flushTimer !== undefined) window.clearTimeout(flushTimer); socket.close(); };
-  }, [loadJournal, loadSnapshot]);
+    return () => {
+      active = false;
+      if (flushTimer !== undefined) window.clearTimeout(flushTimer);
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      socket.close();
+    };
+  }, [loadJournal, loadSnapshot, websocketGeneration, websocketsEnabled]);
 
   useEffect(() => {
     const handleVisibility = () => {
@@ -1017,6 +1054,32 @@ export function App() {
     setSnapshot(body.snapshot);
   }, []);
 
+  const controlWebsockets = useCallback(async (action: "disconnect" | "reconnect") => {
+    setWebsocketAction(action);
+    setError(null);
+    websocketRetryAttempt.current = 0;
+    if (action === "disconnect") setWebsocketsEnabled(false);
+    try {
+      const response = await fetch(`/api/websockets/${action}`, { method: "POST" });
+      if (!response.ok) throw new Error(`WebSocket ${action} failed with HTTP ${response.status}`);
+      if (action === "disconnect") {
+        setConnection("DISCONNECTED");
+      } else {
+        setConnection("CONNECTING");
+        setWebsocketsEnabled(true);
+        setWebsocketGeneration((current) => current + 1);
+      }
+    } catch (reason) {
+      if (action === "disconnect") {
+        setWebsocketsEnabled(true);
+        setWebsocketGeneration((current) => current + 1);
+      }
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setWebsocketAction(null);
+    }
+  }, []);
+
   const windowedEvents = useMemo(
     () => pruneUiEvents(snapshot.recentUiEvents, snapshot.flow5m.evaluatedAtMs, snapshot.flow5m.windowMs),
     [snapshot.recentUiEvents, snapshot.flow5m.evaluatedAtMs, snapshot.flow5m.windowMs]
@@ -1042,6 +1105,7 @@ export function App() {
       <header className="topbar">
         <div className="brand-block"><strong className="brand">SIDE</strong><span className="instrument">SOL / USD</span><span className="window-label">30S EDGE · {visualWindowLabel(visualWindowMs)} BUBBLES</span></div>
         <div className="status-strip" aria-label="Runtime status">
+          <a className="page-nav-link" href="/strategy">AUTO STRATEGY</a>
           <div className="visual-window-control" role="group" aria-label="Bubble display window">
             <span>BUBBLES</span>
             {visualWindowOptions.map(({ label, value }) => <button type="button" key={value} aria-pressed={visualWindowMs === value} onClick={() => { if (value !== visualWindowMs) { setWindowSwitching(true); setVisualWindowMs(value); } }}>{label}</button>)}
@@ -1128,8 +1192,30 @@ export function App() {
         <p>{snapshot.mode === "LIVE" ? "All displayed events arrived from persistent source WebSockets. Bitquery flow is provider-indexed realized activity; source-health messages do not create trade bubbles." : "REPLAY is never presented as LIVE. Bitquery decoded flow is realized activity; the paper preview fixture remains a separate 0x-shaped contract."}</p>
       </section>
 
-      <footer><span>{snapshot.mode === "LIVE" ? "S0 · LIVE INGEST" : "R0 · REPLAY RUNNABLE"}</span><span>Motion {suspended ? "paused" : "active"} · seeded by event ID · hidden-page snapshot recovery</span></footer>
+      <footer>
+        <div className="footer-runtime"><span>{snapshot.mode === "LIVE" ? "S0 · LIVE INGEST" : "R0 · REPLAY RUNNABLE"}</span><span>Motion {suspended ? "paused" : "active"} · seeded by event ID · hidden-page snapshot recovery</span></div>
+        <div className="websocket-controls" role="group" aria-label="WebSocket resource controls">
+          <span aria-live="polite">WS RESOURCE · {websocketsEnabled && connection !== "DISCONNECTED" ? connection : "PAUSED"}</span>
+          <button
+            type="button"
+            className="websocket-button disconnect"
+            disabled={websocketAction !== null || (!websocketsEnabled && connection === "DISCONNECTED")}
+            onClick={() => void controlWebsockets("disconnect")}
+          >{websocketAction === "disconnect" ? "DISCONNECTING…" : "DISCONNECT ALL WS"}</button>
+          <button
+            type="button"
+            className="websocket-button reconnect"
+            disabled={websocketAction !== null || (websocketsEnabled && connection !== "DISCONNECTED")}
+            onClick={() => void controlWebsockets("reconnect")}
+          >{websocketAction === "reconnect" ? "RECONNECTING…" : "RECONNECT ALL WS"}</button>
+        </div>
+      </footer>
       {paperAction ? <PaperDrawer action={paperAction} mode={snapshot.mode} freshJuryCount={verdict.freshJuryCount} onClose={() => setPaperAction(null)} onRecorded={handleRecorded} /> : null}
     </main>
   );
+}
+
+export function App() {
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  return path === "/strategy" ? <StrategyPage /> : <DashboardPage />;
 }

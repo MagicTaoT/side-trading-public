@@ -177,7 +177,7 @@ pnpm smoke:s0
 - `POST /api/paper-orders/preview` 与 `POST /api/paper-orders`；
 - BUY：0x 10,000 USDC exact-in；
 - SELL：同 provider 的 10,000 USDC→SOL anchor，再以该 SOL amount exact-in 卖出；
-- SIDE 本地 2 秒 TTL、idempotency、source health recheck；
+- SIDE 本地 10 秒 TTL、idempotency、source health recheck；
 - 0x failure id；只有用户明确 action 才允许 Jupiter fallback；
 - 只保存 sanitized estimate、route、request ids/times/hash；无 instruction body、signer、assembly、simulation 或 send client。
 

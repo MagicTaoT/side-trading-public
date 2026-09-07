@@ -53,3 +53,12 @@ win rate = positive scored BUY/SELL / all scored BUY/SELL
 - 每行末尾新增两步确认的 `DELETE → CONFIRM`，确认后调用 `DELETE /api/paper-orders/:id`；
 - PostgreSQL 删除 `paper_decisions` 主记录后通过外键级联删除 evidence snapshot、paper order snapshot 与 markout，聚合统计随即重算；
 - 删除是明确用户操作，不影响普通自动刷新，也不开放批量删除。
+
+## 7. Auto Strategy 上线后的职责复核
+
+Shadow Performance 与 Auto Strategy 的历史不属于同一统计口径，当前仍保留：
+
+- Shadow Performance 评价主 Dashboard 上人工记录的单点 `PAPER BUY / SELL / WAIT`，回答“当时的方向判断在固定 +5m 后是否正确”；
+- Auto Strategy 评价参数化规则驱动的完整生命周期，回答“按持续确认、分段加仓和退出规则运行后，一个 basket 的理论结果如何”；
+- 前者是 signal/decision validation，后者是 strategy simulation。固定 +5m markout 不能替代实际策略持仓期 PnL，策略 basket history 也不能识别人工判断是否存在选择偏差；
+- 因此现阶段不删除 PostgreSQL decision journal、markout worker 或首页 Shadow Performance。若产品以后取消人工 PAPER BUY/SELL/WAIT，Shadow Performance 才应连同入口一起退役，而不是因为新增 Auto Strategy 就直接删除。

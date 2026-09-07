@@ -1,5 +1,5 @@
 {
-  "name": "@side/market-core",
+  "name": "@side/strategy-engine",
   "version": "0.3.0",
   "private": true,
   "type": "module",
@@ -16,6 +16,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "zod": "^4.1.0"
+    "decimal.js": "^10.6.0"
   }
 }
