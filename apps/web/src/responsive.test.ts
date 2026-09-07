@@ -39,4 +39,47 @@ describe("cockpit responsive contract", () => {
     expect(css).toMatch(/\.trade-bubble::after\s*\{[\s\S]*?animation:\s*bubble-highlight \.8s/);
     expect(css).toMatch(/@keyframes bubble-highlight\s*\{[\s\S]*?transform:\s*scale\(1\.48\)[\s\S]*?opacity:\s*0/);
   });
+
+  it("offers an independent bubble window without changing the 30s edge or 5m flow layout", () => {
+    expect(app).toContain('{ label: "30S", value: 30_000 }');
+    expect(app).toContain('{ label: "60S", value: 60_000 }');
+    expect(app).toContain('{ label: "3M", value: 180_000 }');
+    expect(app).toContain('{ label: "5M", value: 300_000 }');
+    expect(app).toContain('useState<VisualWindowMs>(60_000)');
+    expect(app).toMatch(/pruneUiEvents\(windowedEvents, snapshot\.flow5m\.evaluatedAtMs, visualWindowMs\)/);
+    expect(app).toMatch(/30S EDGE · \{visualWindowLabel\(visualWindowMs\)\} BUBBLES/);
+    expect(app).toMatch(/marketFlows = flow5m\.segments[\s\S]*?clampedVolumeShare\(buyNotional, sellNotional, 35, 65\)/);
+    expect(css).toMatch(/\.visual-window-control button\[aria-pressed="true"\]/);
+    expect(css).toMatch(/\.window-switching \.trade-bubble[\s\S]*?animation:\s*none/);
+  });
+
+  it("keeps durable shadow performance visible outside the paper drawer", () => {
+    expect(app).toMatch(/<ShadowPerformance[\s\S]*?<section className="source-coverage"/);
+    expect(app).toContain('fetch("/api/shadow-performance")');
+    expect(app).toContain('fetch("/api/paper-orders?limit=12")');
+    expect(css).toMatch(/\.shadow-metrics\s*\{[\s\S]*?grid-template-columns:\s*repeat\(6/);
+    expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*?\.shadow-metrics\s*\{[\s\S]*?repeat\(2/);
+  });
+
+  it("exposes detailed bubble evidence on pointer or keyboard focus", () => {
+    expect(app).toContain("bubbleAuditLabel(event, evaluatedAtMs)");
+    expect(app).toContain("onPointerEnter");
+    expect(app).toContain("onFocus");
+    expect(app).toContain('className="bubble-inspector"');
+  });
+
+  it("shows display-only paper prices and refreshes the action quote every five seconds", () => {
+    expect(app).toContain('fetch("/api/paper-prices")');
+    expect(app).toMatch(/<PaperPriceButton side="BUY"[\s\S]*?<PaperPriceButton side="SELL"/);
+    expect(app).toContain('window.setTimeout(() => void loadPreview("zeroex", null), 5_000)');
+    expect(app).toContain('price.source === "coinbase-dry" ? "COINBASE USD" : "BITQUERY"');
+  });
+
+  it("shows the persisted entry edge and uses two-step deletion for every decision row", () => {
+    expect(app).toContain("ENTRY EDGE");
+    expect(app).toContain("entryEdge(order)");
+    expect(app).toContain('method: "DELETE"');
+    expect(app).toContain('deleteCandidate === order.orderId ? "CONFIRM" : "DELETE"');
+    expect(css).toContain(".decision-delete.confirm");
+  });
 });

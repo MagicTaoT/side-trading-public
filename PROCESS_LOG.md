@@ -46,3 +46,41 @@
 - 真实验收：LIVE 浏览器从 0x 取得新鲜 $10k USDC→SOL estimate，并在 2 秒 TTL 内成功写入 `memory-side-010` paper record；返回与 UI 均未出现 instruction body 或 secret。
 - 边界：paper record 明确为 `memory-side-010`；Postgres、重启恢复、decision journal 和 +5m markout 留给 SIDE-011。
 - Focus time：未启用可靠计时，保持 `not measured`。
+
+## 2026-09-06 · SIDE-011
+
+- 目标：把 paper decision 从进程内存升级为可重启恢复的 PostgreSQL journal，并关闭唯一 +5m 方向评价闭环。
+- 实现：新增 migration、PostgreSQL/测试内存 journal、数据库级 idempotency、decision/evidence/order snapshot、markout schedule/result、列表与 shadow-performance API。
+- Reference：冻结 `bitquery-wsol-usdc-robust-v1`；15 秒 trailing window、至少 3 个去重 economic swaps、中位数、100 bps outlier gate、最多 25% rejected。stale/gap/insufficient/anomaly 一律 unscored，不使用 CEX/HL/旧 estimate 补值。
+- Worker：启动即 catch up，之后每秒扫描；唯一键 `(decisionId, 300000, policyVersion)`，完成更新只接受 `PENDING`，两个 worker 并发验收后 attempts 仍为 1。
+- UI：record 后显示 PostgreSQL persistence、+5m 倒计时、entry reference/sample count 或明确 unavailable 原因；抽屉保持打开时轮询最终结果。
+- 真实验收：本地 PostgreSQL 18 migration、浏览器 paper decision、四表联查、服务重启读取均通过；LIVE readiness 返回 `postgres-side-011`。带独立 PostgreSQL test database 的完整 84 tests 与 production build 通过。
+- 边界：普通 raw feed 不落 PostgreSQL；无 Bitquery backfill 证明时停机窗口只能 unscored。backup/Compose/TLS 与 production hardening 留给 SIDE-012。
+- Focus time：未启用可靠计时，保持 `not measured`。
+
+## 2026-09-07 · SIDE-016
+
+- 目标：把 SIDE-011 journal 和 +5m markout 变成不依赖 Paper Drawer 的常驻 shadow-performance 与 decision-history 界面。
+- 实现：首页加载全部历史聚合和最近 12 条 decision；首次加载、5 秒轮询、页面恢复、record 成功与 markout WebSocket 事件均会同步。PostgreSQL/内存 journal 新增全量 unscored reason counts。
+- UI：显示 decision/action 分布、scored sample、win rate、mean +5m、pending、unscored、entry/future reference、paper PnL 和明确 reason；bubble hover/focus 显示 source、instrument、side、batch、notional、price 与 age。
+- 口径：WAIT 与任何 unscored 结果不进入 sample/win rate；mean 和 paper PnL 明示为 gross directional markout，不包装为 executable PnL。
+- 真实验收：LIVE 页面从 PostgreSQL 读取 3 条 decision，正确显示 `WAIT_ACTION ×2`、`SOURCE_NOT_FRESH ×1`，scored sample 为 0 时 win rate/mean 为 `—`。
+- 测试：新增 performance 纯函数和静态 UI contract tests；带独立 PostgreSQL test database 的 89 项 workspace tests、typecheck 与 production build 通过。
+- 安全边界：无 wallet、signer、assembly、simulation 或 send path；未改变 SIDE-011 reference policy。
+- Focus time：未启用可靠计时，保持 `not measured`。
+
+## 2026-09-07 · SIDE-016 paper price UI follow-up
+
+- 目标：让 PAPER BUY/SELL 不打开 drawer 也能看到真实双向价格，并修复“只有手动 refresh”的体验。
+- 实现：首页每 5 秒读取服务端共享 display snapshot；一轮 0x SELL contract 的 anchor 复用于 BUY display，减少为两次上游调用。点击后的 action-time preview 仍与 display cache 隔离，并每 5 秒自动刷新。
+- 稳定性：真实复现 BUY timeout 与 SELL 接近 2 秒 TTL 边界；随后又观察到 0x 429。加入 429=30 秒、timeout/network=10 秒退避，Jupiter 没有自动调用。
+- Dry policy：0x 不可用时使用 Bitquery strict WSOL/USDC reference；该 reference 不可用时允许 fresh Coinbase SOL-USD reference，固定 BUY +50bp / SELL -50bp，并显式显示 `DRY · COINBASE USD`。dry 值永远 `recordable=false`，不进入 jury 或 markout reference。
+- 真实验收：LIVE 浏览器先显示 Coinbase dry 双边价格，退避结束后自动恢复为 0x LIVE；BUY drawer 在 5 秒后自动取得新 preview，quote age 回到 2 秒内。未触发 Jupiter。
+- 验证：server 32 tests、web 23 tests；workspace 共 92 tests 通过、1 个需独立 PostgreSQL test database 的 integration test 按环境跳过，production build 通过。
+
+## 2026-09-07 · SIDE-016 decision history follow-up
+
+- 目标：让每条 paper decision 明确显示记录时的 edge，并允许用户逐条清理测试记录。
+- 实现：历史新增 `ENTRY EDGE`，直接读取持久化 evidence 内的 entry verdict；新增逐行 `DELETE → CONFIRM` 与服务端 DELETE route。
+- 删除语义：PostgreSQL 使用既有 `ON DELETE CASCADE` 同步删除 evidence、order snapshot 和 markout；内存 journal 同步移除 idempotency 映射，删除后重新拉取 aggregate。
+- 验证：memory、HTTP 与独立 `side_test` PostgreSQL cascade integration tests 均通过；没有删除 LIVE market event 或其他 decision。

@@ -492,16 +492,18 @@ S0 使用 Bitquery 美国区域 GraphQL WebSocket 订阅 WSOL/USDC 两个方向�
 
 官方来源：[Solana DEX Trades](https://docs.bitquery.io/docs/blockchain/Solana/solana-dextrades/)、[Streaming characteristics](https://docs.bitquery.io/docs/streams/)、[Endpoints and regions](https://docs.bitquery.io/docs/start/endpoints/)。
 
-### 4.7 Action-time DEX execution estimates（S0 paper）
+### 4.7 Display 与 action-time DEX execution estimates（S0 paper）
 
-S0 不使用 0x 或 Jupiter 作为连续行情或 DEX 成交流。Paper drawer 打开/刷新时：
+S0 不使用 0x 或 Jupiter 作为 DEX 成交流或 signal evidence。首页活跃时按 5 秒 base cadence 请求服务端共享的 0x display snapshot；display 固定不可 record，也不产生 bubble/jury。Paper drawer 打开/刷新时则取得独立的 action-time quote：
 
-1. primary 调用 0x Solana `swap-instructions` 并只消费 sanitized estimate fields；
+1. primary 调用 0x Solana `swap-instructions` 并只消费 sanitized estimate fields；首页一轮 SELL contract 的 anchor 同时复用于 BUY display，以两次而不是三次上游调用生成双向价格；
 2. 0x 失败时显示 unavailable；只有用户明确触发 `TRY JUPITER ESTIMATE` 才请求 Jupiter；
 3. BUY 固定 ExactIn 10,000 USDC；
 4. SELL 先用同一 provider 请求 fresh 10,000 USDC → SOL anchor estimate，再用该 SOL amount 请求 ExactIn SOL → USDC；两个 request id/time/source 一起保存；
-5. 任一 required request 失败或超过本地 TTL 时禁止 record；不回退旧值；
+5. 任一 required action-time request 失败或超过本地 TTL 时禁止 record；display cache 与 dry model 永远不能提交；
 6. Jupiter fallback 同样只保留 quote/route 必需字段和原始响应 hash，丢弃 instruction body，不组装、模拟或发送交易。
+
+0x `429` 时 display sampler 退避 30 秒，timeout/network 时退避 10 秒；基础轮询仍为 5 秒且多个浏览器共享同一 server snapshot。0x 不可用时，UI 可展示 Bitquery strict WSOL/USDC reference，或 fresh Coinbase SOL-USD reference 加固定 ±50bp 的纯 dry 双边模型；必须显式标记来源、USD/USDC basis 风险、`DRY` 与 `recordable=false`。任何失败都不得自动调用 Jupiter。
 
 M0 若需要持续多规模 execution context，再单独评估 quota 和 refresh policy；不能反向把它写成 S0 依赖。[Jupiter Swap V2](https://developers.jup.ag/docs/swap)、[`/build`](https://developers.jup.ag/docs/swap/build)
 
@@ -600,7 +602,7 @@ POST /api/paper-orders/preview
   -> never assemble, sign, simulate, or send a transaction
 ```
 
-服务端记录 0x 原始响应的 hash 与必要字段，避免在日志里写 API key。若 0x 调用失败，UI 明确显示 unavailable；只有用户明确调用 fallback action 时才请求 Jupiter estimate，不能由 server 静默切换。Jupiter 必须复用相同 BUY 或 SELL anchor + directional request 口径，且将 `provider="jupiter"` 与 0x 失败原因写入 preview。`previewId` 的 2 秒有效期是 SIDE 的本地风险政策，不是任一 provider 的锁价或 API expiry；record 时仍需复核 server-side policy、pair、notional 与 source health。
+服务端记录 0x 原始响应的 hash 与必要字段，避免在日志里写 API key。若 0x 调用失败，UI 明确显示 unavailable 或不可执行的 dry model；只有用户明确调用 fallback action 时才请求 Jupiter estimate，不能由 server 静默切换。Jupiter 必须复用相同 BUY 或 SELL anchor + directional request 口径，且将 `provider="jupiter"` 与 0x 失败原因写入 preview。`previewId` 的 2 秒有效期是 SIDE 的本地风险政策，不是任一 provider 的锁价或 API expiry；record 时仍需复核 server-side policy、pair、notional 与 source health。首页 5 秒 display snapshot 不携带可提交资格。
 
 ### 5.3 真实 swap 延伸版
 

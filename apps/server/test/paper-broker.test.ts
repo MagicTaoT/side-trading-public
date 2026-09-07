@@ -69,6 +69,7 @@ describe("SIDE-010 paper estimate broker", () => {
       side: "BUY",
       estimatedOutputSOL: "56.710000000",
       referencePxQuotePerSol: "176.335743",
+      effectivePxQuotePerSol: "176.335743",
       recordable: true
     });
     expect(JSON.stringify(first)).not.toMatch(/instructions|api.?key|taker/iu);
@@ -88,6 +89,7 @@ describe("SIDE-010 paper estimate broker", () => {
       status: "READY",
       inputAmountSOL: "56.710000000",
       estimatedOutputUSDC: "9950.000000",
+      effectivePxQuotePerSol: "175.454065",
       provider: "zeroex"
     });
     expect(preview.anchor?.provider).toBe(preview.directional?.provider);
@@ -159,7 +161,12 @@ describe("SIDE-010 paper estimate broker", () => {
     const first = await broker.record(recordRequest);
     const second = await broker.record(recordRequest);
     expect(first).toEqual(second);
-    expect(first).toMatchObject({ executionMode: "paper", persistence: "memory-side-010", action: "BUY" });
+    expect(first).toMatchObject({
+      executionMode: "paper",
+      persistence: "memory-side-011-test",
+      action: "BUY",
+      markout: { status: "PENDING", horizonMs: 300_000 }
+    });
 
     const another = await broker.preview({ side: "BUY", provider: "zeroex", idempotencyKey: "preview-expire-1", primaryFailureId: null });
     now = 3_101;

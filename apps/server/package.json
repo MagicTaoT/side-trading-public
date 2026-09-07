@@ -1,11 +1,11 @@
 {
   "name": "@side/server",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -b",
-    "dev": "node --watch --import tsx src/main.ts",
+    "build": "tsc -b && mkdir -p dist/migrations && cp migrations/*.sql dist/migrations/",
+    "dev": "node --conditions=development --watch --import tsx src/main.ts",
     "start": "node dist/src/main.js",
     "smoke": "node --import tsx src/smoke.ts",
     "typecheck": "tsc -b --pretty false",
@@ -18,9 +18,11 @@
     "@side/signal-engine": "workspace:*",
     "decimal.js": "^10.6.0",
     "fastify": "^5.6.0",
+    "pg": "^8.23.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.0",
     "tsx": "^4.20.0"
   }

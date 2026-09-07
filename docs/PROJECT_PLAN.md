@@ -2,8 +2,8 @@
 
 > 工作定义：**See what the market is actually saying - and where it disagrees.**
 
-状态：规划基线 v0.2；SIDE-001 至 SIDE-005、SIDE-010 complete；SIDE-006 local required gates complete / target AWS gate blocked；SIDE-007 至 SIDE-009 runtime adapters 已接入但 R1 完整退出门未完成；R0 REPLAY RUNNABLE；S0 产品版本 in execution
-日期：2026-09-06
+状态：规划基线 v0.2；SIDE-001 至 SIDE-005、SIDE-010、SIDE-011、SIDE-016 complete；SIDE-006 local required gates complete / target AWS gate blocked；SIDE-007 至 SIDE-009 runtime adapters 已接入但 R1 完整退出门未完成；R0 REPLAY RUNNABLE；S0 产品版本 in execution
+日期：2026-09-07
 目标市场：SOL only
 核心决策周期：未来 5 分钟（MVP 唯一窗口）
 
@@ -14,7 +14,7 @@
 1. **市场判断与模拟验证**：使用真实行情与报价 API，以 paper run 验证短窗口判断；已发布版本不使用真实资金、不签名、不广播。
 2. **执行扩展**：在独立版本中验证真实执行，配置凭据、风险限额和恢复机制。
 
-用户新增的 Binance、KuCoin、OKX spot/perp、Solana SOL-USDC/SOL-USDT、Hyperliquid SOL-perp 全部进入 Project MVP。S0 按 [SIDE-001](SIDE-001_SOURCE_FREEZE.md) 冻结为：Coinbase `SOL-USD` + Coinbase Derivatives `SLP` 原子 CEX profile 优先，任一 source 未通过目标美国 AWS region preflight 时整组回退 Binance spot/perp；Hyperliquid 提供 DeFi perp；Bitquery 提供 WSOL/USDC decoded realized DEX flow；0x 提供 action-time paper estimate，Jupiter 只做用户明确触发的 fallback。为了不把范围膨胀成交易终端，第一阶段只采对核心判断有用的字段，并在 UI 中聚合成四个 jury，不增加多资产、策略编辑器或多场所真实下单。
+用户新增的 Binance、KuCoin、OKX spot/perp、Solana SOL-USDC/SOL-USDT、Hyperliquid SOL-perp 全部进入 Project MVP。S0 按 [SIDE-001](SIDE-001_SOURCE_FREEZE.md) 冻结为：Coinbase `SOL-USD` + Coinbase Derivatives `SLP` 原子 CEX profile 优先，任一 source 未通过目标美国 AWS region preflight 时整组回退 Binance spot/perp；Hyperliquid 提供 DeFi perp；Bitquery 提供 WSOL/USDC decoded realized DEX flow；0x 提供 5 秒共享显示 estimate 与独立 action-time paper estimate，Jupiter 只做用户明确触发的 fallback。为了不把范围膨胀成交易终端，第一阶段只采对核心判断有用的字段，并在 UI 中聚合成四个 jury，不增加多资产、策略编辑器或多场所真实下单。
 
 最重要的 UI 调整是：**首页由事件驱动，而不是一组定时刷新卡片。** 每个被可视层接纳的标准化事件都会在其来源区域留下瞬时、语义化反馈；中央 verdict 只在累积证据跨越阈值后改变，避免随着每个 tick 闪烁。
 
@@ -84,6 +84,7 @@ SIDE 帮助 SOL 交易者判断短窗口内的方向、一致性和等待时机�
   -> 自动进入 SOL / USD、5 MIN WINDOW、PAPER MODE
   -> 看到实时事件在四个市场区域发生
   -> 中央 verdict 只在跨市场证据成立时变化
+  -> PAPER BUY / SELL 框直接看到双向 $10k estimate 或明确 dry 状态
   -> 点击 PAPER BUY、PAPER SELL 或 RECORD WAIT
   -> review 固定名义金额、0x 估算输出、最小输出、route 与 quote age
   -> RECORD PAPER ORDER（不签名、不广播）
@@ -113,7 +114,7 @@ S0 的“双向 $10k paper estimate”使用明确且可重放的 exact-in 口�
 | S0-03 | 四类 Market Jury | CEX spot、CEX perp、DEX spot、DeFi perp 各给 BUY/SELL/NEUTRAL 与 1-2 条可解释证据 |
 | S0-04 | Event-driven 首页 | 每个 UI gateway 接纳的 visual event 在具体 venue lane 触发局部反馈；100 ms batch 明示 `×N` |
 | S0-05 | Verdict 状态机 | BUY BIAS / SELL BIAS / NO EDGE；数据不足时单独显示 INSUFFICIENT DATA |
-| S0-06 | Paper order | 固定 SOL-USDC、双向 $10k 口径；fresh 0x preview → record；0x 失败后只能由用户明确触发 Jupiter fallback；无 signer/send code path |
+| S0-06 | Paper order | 固定 SOL-USDC、双向 $10k 口径；按钮 5 秒刷新 display-only estimate，点击后 fresh 0x preview → record；0x 失败后只能由用户明确触发 Jupiter fallback；无 signer/send code path |
 | S0-07 | 决策记录与 5m markout | PAPER BUY / PAPER SELL / RECORD WAIT；保存 decision-time evidence；+5m 计算或明确 unscored |
 | S0-08 | Demo resilience | 一段明确标记为 REPLAY 的黄金场景；最小 source health/freshness；部署链接可运行 |
 
@@ -446,7 +447,7 @@ S0 聚焦一个资产、四类市场证据与模拟验证。更多场所、完�
 ### S0 - Product validation
 
 - **AWS 主机信息**：Ubuntu 版本、CPU/RAM/磁盘、region、固定公网 IP、域名/DNS、SSH 方式；
-- **0x API key**：仅用于用户 action-time paper preview，放服务端 secret store，不贴进聊天、代码或浏览器；
+- **0x API key**：用于页面活跃时的 5 秒共享 display sampler 与用户 action-time preview，放服务端 secret store，不贴进聊天、代码或浏览器；
 - **Jupiter API key/quota**：只用于 0x 失败后由用户明确触发的 paper estimate fallback，不作连续行情源；
 - **Bitquery API token 与 stream entitlement**：使用美国区域 GraphQL WebSocket；需要同时支持 live subscription 与 reconnect historical backfill query；
 - Coinbase `SOL-USD` 与 Hyperliquid public market feed 不需要 private/trading credential；Coinbase Derivatives `SLP` 只有在无需 CDE participant entitlement 即可取得 S0 所需 BBO/trades 时才通过 primary profile 选择门；
@@ -478,7 +479,7 @@ Hyperliquid/CEX live execution 不属于 L0；如未来单独立项，再定义 
 |---|---|---|
 | 数据源过多，扩大验证范围 | 高 | S0 只启用一个原子 CEX profile、HL、Bitquery WSOL/USDC flow 与 action-time paper estimate；完整覆盖进入 M0 |
 | 动效变成噪声或掉帧 | 高 | 100 ms micro-batch、zone rate cap、Canvas/SVG overlay、motion pause/reduced mode |
-| 0x/Jupiter 被当作连续行情源或成交源 | 高 | S0 DEX evidence 来自 Bitquery realized swaps；0x 仅在 paper action 时刷新，Jupiter 仅为显式 fallback |
+| 0x/Jupiter 被当作成交或 signal evidence | 高 | S0 DEX evidence 仍只来自 Bitquery realized swaps；0x display sampler 不生成 bubble/jury 且不可 record，Jupiter 仅为显式 fallback |
 | 0x Solana 仅 mainnet beta | 高 | 模拟验证版不广播；真实路径按 decode → validate → simulate → canary 开门 |
 | Bitquery 被误称为 Solana 全市场 | 高 | 显示 decoded coverage；RFQ/未知协议标 gap；多腿 route 合并为一个 economic swap |
 | Bitquery WS at-most-once 且无 replay | 高 | live buffer + historical query backfill + logical dedupe；未修复 gap 时 DEX jury unavailable |

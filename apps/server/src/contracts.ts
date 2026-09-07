@@ -1,5 +1,6 @@
 import type { UiEvent } from "@side/market-core";
 import type { S0Segment, SignalSnapshot } from "@side/signal-engine";
+import type { PaperMarkout } from "./paper/contracts.js";
 
 export type RuntimeMode = "LIVE" | "REPLAY";
 export type ReplayStatus = "disabled" | "idle" | "running" | "completed" | "stopped";
@@ -87,6 +88,7 @@ export type GatewayMessage =
   | { type: "source_health"; source: SourceRuntimeState }
   | { type: "signal_state"; signal: SignalSnapshot }
   | { type: "flow_state"; flow: FlowWindowSnapshot }
+  | { type: "paper_markout"; markout: PaperMarkout }
   | {
       type: "resync_required";
       suppressedCountByKind: Record<string, number>;

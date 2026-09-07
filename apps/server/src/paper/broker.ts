@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 import Decimal from "decimal.js";
 import type {
+  DexReferenceSnapshot,
   PaperAction,
   PaperEvidence,
   PaperFailureCode,
+  PaperMarkout,
   PaperOrder,
+  PaperPerformanceSummary,
   PaperPreview,
   PaperProvider,
   PaperQuoteFailure,
@@ -13,7 +16,16 @@ import type {
   PreviewRequest,
   RecordPaperOrderRequest
 } from "./contracts.js";
-import { PAPER_NOTIONAL_QUOTE, PAPER_PAIR, PAPER_PREVIEW_TTL_MS, USDC_MINT, WSOL_MINT } from "./contracts.js";
+import {
+  PAPER_MARKOUT_HORIZON_MS,
+  PAPER_NOTIONAL_QUOTE,
+  PAPER_PAIR,
+  PAPER_PREVIEW_TTL_MS,
+  REFERENCE_POLICY_VERSION,
+  USDC_MINT,
+  WSOL_MINT
+} from "./contracts.js";
+import { JournalConflictError, MemoryDecisionJournal, type DecisionJournal } from "./journal.js";
 import { ProviderQuoteError, type PaperQuoteProvider } from "./providers.js";
 
 const USDC_ATOMIC = "10000000000";
@@ -32,6 +44,8 @@ interface BrokerOptions {
   now?: Clock;
   id?: IdFactory;
   ttlMs?: number;
+  journal?: DecisionJournal;
+  reference?: (evaluatedAtMs: number) => DexReferenceSnapshot;
 }
 
 interface Cached<T> {
@@ -78,6 +92,8 @@ export class PaperEstimateBroker {
   readonly #now: Clock;
   readonly #id: IdFactory;
   readonly #ttlMs: number;
+  readonly #journal: DecisionJournal;
+  readonly #reference: (evaluatedAtMs: number) => DexReferenceSnapshot;
   readonly #previewRequests = new Map<string, Cached<PaperPreview>>();
   readonly #orderRequests = new Map<string, Cached<PaperOrder>>();
   readonly #previews = new Map<string, PaperPreview>();
@@ -96,7 +112,22 @@ export class PaperEstimateBroker {
     this.#now = options.now ?? Date.now;
     this.#id = options.id ?? randomUUID;
     this.#ttlMs = options.ttlMs ?? PAPER_PREVIEW_TTL_MS;
+    this.#journal = options.journal ?? new MemoryDecisionJournal();
+    this.#reference = options.reference ?? ((evaluatedAtMs) => ({
+      policyVersion: REFERENCE_POLICY_VERSION,
+      status: "UNAVAILABLE",
+      evaluatedAtMs,
+      windowStartMs: evaluatedAtMs - 15_000,
+      windowEndMs: evaluatedAtMs,
+      priceQuotePerSol: null,
+      sampleCount: 0,
+      rejectedSampleCount: 0,
+      reason: "SOURCE_NOT_OBSERVED"
+    }));
   }
+
+  get journal(): DecisionJournal { return this.#journal; }
+  get reference(): (evaluatedAtMs: number) => DexReferenceSnapshot { return this.#reference; }
 
   async preview(request: PreviewRequest): Promise<PaperPreview> {
     validateIdempotencyKey(request.idempotencyKey);
@@ -138,8 +169,30 @@ export class PaperEstimateBroker {
     return this.#refreshPreview(preview);
   }
 
-  getOrder(orderId: string): PaperOrder | null {
-    return this.#orders.get(orderId) ?? null;
+  async getOrder(orderId: string): Promise<PaperOrder | null> {
+    return await this.#journal.getDecision(orderId) ?? this.#orders.get(orderId) ?? null;
+  }
+
+  async listOrders(limit: number): Promise<PaperOrder[]> {
+    return this.#journal.listDecisions(limit);
+  }
+
+  async deleteOrder(orderId: string): Promise<boolean> {
+    const deleted = await this.#journal.deleteDecision(orderId);
+    if (!deleted) return false;
+    this.#orders.delete(orderId);
+    for (const [key, cached] of this.#orderRequests) {
+      try {
+        if ((await cached.value).orderId === orderId) this.#orderRequests.delete(key);
+      } catch {
+        // Failed cached requests never produced this persisted order.
+      }
+    }
+    return true;
+  }
+
+  async performance(): Promise<PaperPerformanceSummary> {
+    return this.#journal.performance();
   }
 
   #assertFallbackPolicy(request: PreviewRequest): void {
@@ -187,6 +240,9 @@ export class PaperEstimateBroker {
       const referencePxQuotePerSol = new Decimal(PAPER_NOTIONAL_QUOTE)
         .div(new Decimal(referenceSolAtomic).div(1_000_000_000))
         .toFixed(6);
+      const effectivePxQuotePerSol = request.side === "BUY"
+        ? new Decimal(PAPER_NOTIONAL_QUOTE).div(estimatedOutputSOL as string).toFixed(6)
+        : new Decimal(estimatedOutputUSDC as string).div(inputAmountSOL as string).toFixed(6);
       const preview: PaperPreview = {
         schemaVersion: 1,
         previewId,
@@ -209,6 +265,7 @@ export class PaperEstimateBroker {
         estimatedOutputUSDC,
         minimumOutputAmount,
         referencePxQuotePerSol,
+        effectivePxQuotePerSol,
         routeSummary: routeSummary(request.provider, [anchor, directional].filter((leg): leg is PaperQuoteLeg => leg !== null)),
         feeBreakdown: null
       };
@@ -266,6 +323,7 @@ export class PaperEstimateBroker {
       estimatedOutputUSDC: null,
       minimumOutputAmount: null,
       referencePxQuotePerSol: null,
+      effectivePxQuotePerSol: null,
       routeSummary: [],
       feeBreakdown: null
     };
@@ -296,23 +354,50 @@ export class PaperEstimateBroker {
       const failedAt = this.#providerFailedAt.get(preview.provider) ?? 0;
       if (failedAt > availableAt) throw new PaperPolicyError(409, "PROVIDER_HEALTH_CHANGED");
     }
+    const recordedAtMs = this.#now();
+    const entryReference = this.#reference(recordedAtMs);
+    const markout: PaperMarkout = {
+      decisionId: `paper:${this.#id()}`,
+      horizonMs: PAPER_MARKOUT_HORIZON_MS,
+      referencePolicyVersion: REFERENCE_POLICY_VERSION,
+      dueAtMs: recordedAtMs + PAPER_MARKOUT_HORIZON_MS,
+      status: "PENDING",
+      entryReference,
+      futureReference: null,
+      directionalMarkoutBps: null,
+      directionalPnlQuote: null,
+      reason: null,
+      computedAtMs: null
+    };
     const order: PaperOrder = {
       schemaVersion: 1,
-      orderId: `paper:${this.#id()}`,
+      orderId: markout.decisionId,
       executionMode: "paper",
-      persistence: "memory-side-010",
+      persistence: this.#journal.persistence,
       action: request.action,
       pair: PAPER_PAIR,
       targetNotionalQuote: PAPER_NOTIONAL_QUOTE,
       provider: preview?.provider ?? null,
       previewId: preview?.previewId ?? null,
-      recordedAtMs: this.#now(),
+      recordedAtMs,
       preview,
-      evidence
+      evidence,
+      markout
     };
-    this.#orders.set(order.orderId, order);
+    let stored: PaperOrder;
+    try {
+      stored = await this.#journal.recordDecision({
+        order,
+        idempotencyKey: request.idempotencyKey,
+        requestFingerprint: `${request.action}:${request.previewId ?? "none"}:${request.provider ?? "none"}`
+      });
+    } catch (reason) {
+      if (reason instanceof JournalConflictError) throw new PaperPolicyError(409, reason.code);
+      throw reason;
+    }
+    this.#orders.set(stored.orderId, stored);
     trimMap(this.#orders);
-    return order;
+    return stored;
   }
 
   #refreshPreview(preview: PaperPreview): PaperPreview {

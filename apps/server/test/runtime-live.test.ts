@@ -34,6 +34,12 @@ describe("S0Runtime LIVE mode", () => {
 
     expect(runtime.ingestLive(trade)?.ingestSeq).toBe("1");
     expect(runtime.ingestLive(trade)).toBeNull();
+    expect(runtime.paperDryReference(1_002)).toMatchObject({
+      status: "READY",
+      source: "coinbase-sol-usd",
+      priceQuotePerSol: "106.250000",
+      observedAtMs: 1_001
+    });
     runtime.ingestLive(base("coinbase:health:reconnecting", "source-health", {
       connection: "reconnecting",
       transportLastSeenAtMs: 1_001,
@@ -50,6 +56,7 @@ describe("S0Runtime LIVE mode", () => {
       sources: [{ provider: "coinbase", connection: "reconnecting", quality: "degraded", replay: false }]
     });
     expect(runtime.snapshot().recentUiEvents).toHaveLength(1);
+    expect(runtime.paperDryReference(1_002)).toMatchObject({ status: "UNAVAILABLE", reason: "CEX_REFERENCE_NOT_FRESH" });
     expect(runtime.snapshot().flow5m.segments).toContainEqual({
       segment: "cex-spot",
       buyCount: 1,
@@ -59,6 +66,7 @@ describe("S0Runtime LIVE mode", () => {
     });
 
     runtime.tick(301_002);
+    expect(runtime.paperDryReference(301_002)).toMatchObject({ status: "UNAVAILABLE", reason: "CEX_REFERENCE_NOT_FRESH" });
     expect(runtime.snapshot().flow5m.segments.find(({ segment }) => segment === "cex-spot")).toMatchObject({
       buyCount: 0,
       buyNotionalQuote: "0.00"

@@ -12,10 +12,14 @@ import type {
   SourceRuntimeState
 } from "./contracts.js";
 import { BoundedGatewayQueue } from "./gateway-queue.js";
+import type { DexReferenceSnapshot, PaperDryReferenceSnapshot, PaperMarkout } from "./paper/contracts.js";
+import { PAPER_DRY_REFERENCE_MAX_AGE_MS } from "./paper/contracts.js";
+import { robustDexReference, type DexPriceSample } from "./paper/reference.js";
 import { IngestSequenceAllocator } from "./sequence.js";
 
 const RECENT_STATE_EVENT_LIMIT_PER_ZONE = 50;
 const FLOW_WINDOW_MS = 300_000;
+const DEX_REFERENCE_RETENTION_MS = 315_000;
 
 interface FlowSample {
   atMs: number;
@@ -168,6 +172,7 @@ export class S0Runtime {
   #signal = new S0SignalEngine();
   #seenLiveEventIds = new Set<string>();
   #flowSamples: FlowSample[] = [];
+  #dexReferenceSamples: DexPriceSample[] = [];
 
   constructor(
     private readonly replayJsonl: string,
@@ -192,6 +197,50 @@ export class S0Runtime {
       signal: this.#signal.snapshot(),
       paperPreview: this.mode === "LIVE" ? LIVE_PAPER_PREVIEW : REPLAY_PAPER_PREVIEW
     };
+  }
+
+  bitqueryReference(evaluatedAtMs: number): DexReferenceSnapshot {
+    return robustDexReference(
+      evaluatedAtMs,
+      this.#dexReferenceSamples,
+      this.#sources.get("bitquery") ?? null
+    );
+  }
+
+  paperDryReference(evaluatedAtMs: number): PaperDryReferenceSnapshot {
+    const dex = this.bitqueryReference(evaluatedAtMs);
+    if (dex.status === "READY" && dex.priceQuotePerSol) {
+      return {
+        status: "READY",
+        source: "bitquery-wsol-usdc",
+        priceQuotePerSol: dex.priceQuotePerSol,
+        observedAtMs: dex.evaluatedAtMs,
+        reason: null
+      };
+    }
+    const coinbase = this.#sources.get("coinbase");
+    if (!coinbase) {
+      return { status: "UNAVAILABLE", source: null, priceQuotePerSol: null, observedAtMs: null, reason: "CEX_REFERENCE_NOT_OBSERVED" };
+    }
+    const candidates = this.#recentUiEvents
+      .filter((event) => event.sourceProvider === "coinbase" && event.instrumentId === "SOL-USD" &&
+        (event.kind === "bbo" || event.kind === "trade") && event.minPx && event.maxPx)
+      .sort((left, right) => right.batchEndMs - left.batchEndMs);
+    const latest = candidates[0];
+    if (coinbase.quality !== "fresh" || !latest || evaluatedAtMs - latest.batchEndMs > PAPER_DRY_REFERENCE_MAX_AGE_MS) {
+      return { status: "UNAVAILABLE", source: null, priceQuotePerSol: null, observedAtMs: latest?.batchEndMs ?? null, reason: "CEX_REFERENCE_NOT_FRESH" };
+    }
+    return {
+      status: "READY",
+      source: "coinbase-sol-usd",
+      priceQuotePerSol: new Decimal(latest.minPx as string).plus(latest.maxPx as string).div(2).toFixed(6),
+      observedAtMs: latest.batchEndMs,
+      reason: null
+    };
+  }
+
+  publishMarkout(markout: PaperMarkout): void {
+    this.#broadcast({ type: "paper_markout", markout });
   }
 
   connect(send: (serialized: string) => void): () => void {
@@ -234,6 +283,7 @@ export class S0Runtime {
     this.#sequence.reset();
     this.#signal.reset();
     this.#flowSamples = [];
+    this.#dexReferenceSamples = [];
   }
 
   ingestLive(draft: Record<string, unknown>): MarketEvent | null {
@@ -254,6 +304,7 @@ export class S0Runtime {
     const transitions = this.#signal.tick(nowMs);
     this.#pruneFlow(nowMs);
     this.#recentUiEvents = pruneUiEvents(this.#recentUiEvents, nowMs);
+    this.#pruneDexReferences(nowMs);
     this.#broadcast({ type: "flow_state", flow: this.#flowSnapshot() });
     if (transitions.length > 0) {
       this.#broadcast({ type: "signal_state", signal: this.#signal.snapshot() });
@@ -279,6 +330,7 @@ export class S0Runtime {
 
     const signalTransitions = this.#signal.ingest(event);
     const flowChanged = this.#recordFlow(event);
+    this.#recordDexReference(event);
     this.#broadcast({ type: "source_health", source });
     if (event.kind !== "source-health") {
       const uiEvent = uiEventFor(event);
@@ -306,6 +358,21 @@ export class S0Runtime {
     this.#flowSamples.push({ atMs: event.receivedAtUnixMs, segment: signalSegmentFor(event), side, notionalQuote });
     this.#pruneFlow(event.receivedAtUnixMs);
     return true;
+  }
+
+  #recordDexReference(event: MarketEvent): void {
+    if (event.kind !== "onchain-swap" || event.source.provider !== "bitquery") return;
+    this.#dexReferenceSamples.push({
+      eventId: event.eventId,
+      observedAtMs: event.receivedAtUnixMs,
+      priceQuotePerSol: event.payload.effectivePxQuotePerSol
+    });
+    this.#pruneDexReferences(event.receivedAtUnixMs);
+  }
+
+  #pruneDexReferences(nowMs: number): void {
+    const cutoff = nowMs - DEX_REFERENCE_RETENTION_MS;
+    this.#dexReferenceSamples = this.#dexReferenceSamples.filter(({ observedAtMs }) => observedAtMs > cutoff);
   }
 
   #pruneFlow(nowMs: number): void {

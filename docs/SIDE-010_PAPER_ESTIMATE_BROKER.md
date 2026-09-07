@@ -1,6 +1,6 @@
 # SIDE-010 - Paper Estimate Broker
 
-状态：**COMPLETE · PAPER ONLY · VOLATILE RECORDS UNTIL SIDE-011**
+状态：**COMPLETE · PAPER ONLY · SUPERSEDED BY SIDE-011 DURABLE JOURNAL**
 日期：2026-09-06
 
 ## 1. 交付结论
@@ -15,7 +15,7 @@ SIDE-010 已把 paper drawer 从静态 preview contract 接到服务端 action-t
 - 0x 失败返回可审计 `failureId`；Jupiter 只有收到匹配 side、仍有效的 0x failure id 后才允许显式请求；
 - preview 与 record 都要求 idempotency key；同 key 改变参数会 fail closed。
 
-当前 record 使用有界进程内存并明确返回 `persistence=memory-side-010`。Postgres、重启恢复、decision journal 和 +5m markout 属于 SIDE-011，SIDE-010 不伪装成持久化完成。
+SIDE-010 最初使用有界进程内存；该边界现已由 [SIDE-011](SIDE-011_DECISION_JOURNAL_MARKOUT.md) 的 PostgreSQL journal、重启恢复与 +5m markout 取代。
 
 ## 2. 安全边界
 
@@ -57,3 +57,11 @@ SIDE-010 已把 paper drawer 从静态 preview contract 接到服务端 action-t
 - SIDE-011：Postgres decision journal、重启恢复与 +5m markout；
 - SIDE-012：部署限流、HTTPS 与 release documentation；
 - 真实签名、模拟和广播继续不存在。
+
+## 6. 2026-09-07 UI follow-up
+
+- 首页 PAPER BUY/SELL 现在直接读取服务端共享 `/api/paper-prices`；页面打开时 base cadence 为 5 秒，无客户端时不主动消耗 quota；
+- 一轮只取一次 SELL contract，其 USDC→SOL anchor 同时作为 BUY display，合计两次 0x 请求；
+- display snapshot 固定 `recordable=false`。点击 BUY/SELL 后仍独立请求新的 2 秒 TTL preview，抽屉每 5 秒自动重取 0x；
+- 429 退避 30 秒，timeout/network 退避 10 秒；不自动调用 Jupiter；
+- 0x 不可用时先用严格 Bitquery WSOL/USDC reference，否则使用 fresh Coinbase SOL-USD reference，并施加固定双边 ±50bp dry assumption。两者均标记 `DRY`、不可执行、不可 record；Coinbase fallback 明示 USD/USDC basis 尚未建模。

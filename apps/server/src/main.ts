@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { createApp } from "./app.js";
 import { loadDefaultReplayFixture } from "./fixture.js";
 import { discoverCoinbaseSlpProduct } from "./live/coordinator.js";
+import { MemoryDecisionJournal, PostgresDecisionJournal } from "./paper/journal.js";
 
 const invocationDirectory = process.env.INIT_CWD ?? process.cwd();
 for (const fileName of [".env.preflight.local", ".env.live.local"]) {
@@ -17,15 +18,18 @@ const mode = process.env.S0_RUNTIME_MODE === "LIVE" ? "LIVE" : "REPLAY";
 const bitqueryToken = process.env.BITQUERY_TOKEN;
 const zeroexApiKey = process.env.ZEROEX_API_KEY;
 const jupiterApiKey = process.env.JUPITER_API_KEY;
+const databaseUrl = process.env.DATABASE_URL;
 const coinbasePerpProductId = mode === "LIVE"
   ? process.env.S0_COINBASE_PERP_PRODUCT ?? await discoverCoinbaseSlpProduct()
   : undefined;
 if (mode === "LIVE" && !bitqueryToken) throw new Error("BITQUERY_TOKEN is required for LIVE mode");
+if (mode === "LIVE" && !databaseUrl) throw new Error("DATABASE_URL is required for LIVE SIDE-011 persistence");
 const app = await createApp({
   replayJsonl,
   logger: true,
   mode,
   cexProfile: mode === "LIVE" ? "coinbase" : "coinbase",
+  journal: databaseUrl ? new PostgresDecisionJournal(databaseUrl) : new MemoryDecisionJournal(),
   ...(mode === "LIVE" && bitqueryToken && coinbasePerpProductId
     ? { live: { bitqueryToken, coinbasePerpProductId } }
     : {}),

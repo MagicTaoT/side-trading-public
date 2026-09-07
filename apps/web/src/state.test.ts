@@ -70,6 +70,13 @@ describe("mergeUiEvent", () => {
     expect(pruneUiEvents([event], 300_999)).toEqual([event]);
     expect(pruneUiEvents([event], 301_000)).toEqual([]);
   });
+
+  it("supports shorter visual windows without changing the stored event", () => {
+    expect(pruneUiEvents([event], 30_999, 30_000)).toEqual([event]);
+    expect(pruneUiEvents([event], 31_000, 30_000)).toEqual([]);
+    expect(pruneUiEvents([event], 61_000, 60_000)).toEqual([]);
+    expect(event.batchEndMs).toBe(1_000);
+  });
 });
 
 describe("microBatchUiEvents", () => {
@@ -141,6 +148,14 @@ describe("seededVisual", () => {
     expect(bubbleAgeOpacity(event, event.batchEndMs + 150_000)).toBeCloseTo(0.3);
     expect(bubbleAgeOpacity(event, event.batchEndMs + 225_000)).toBeCloseTo(0.2);
     expect(bubbleAgeOpacity(event, event.batchEndMs + 300_000)).toBeCloseTo(0.1);
+  });
+
+  it("scales the same fade curve proportionally to the selected window", () => {
+    expect(bubbleAgeOpacity(event, event.batchEndMs, 30_000)).toBeCloseTo(0.85);
+    expect(bubbleAgeOpacity(event, event.batchEndMs + 7_500, 30_000)).toBeCloseTo(0.575);
+    expect(bubbleAgeOpacity(event, event.batchEndMs + 15_000, 30_000)).toBeCloseTo(0.3);
+    expect(bubbleAgeOpacity(event, event.batchEndMs + 22_500, 30_000)).toBeCloseTo(0.2);
+    expect(bubbleAgeOpacity(event, event.batchEndMs + 30_000, 30_000)).toBeCloseTo(0.1);
   });
 });
 

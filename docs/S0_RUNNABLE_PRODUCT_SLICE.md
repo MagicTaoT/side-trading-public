@@ -1,6 +1,6 @@
 # S0 - Runnable Product Slice
 
-状态：**IN EXECUTION · R0 REPLAY RUNNABLE · SIDE-006 LOCAL GATES COMPLETE / AWS GATE BLOCKED**
+状态：**IN EXECUTION · R0 REPLAY RUNNABLE · SIDE-016 SHADOW UI COMPLETE · SIDE-006 LOCAL GATES COMPLETE / AWS GATE BLOCKED**
 基线日期：2026-09-04
 已完成依赖：[SIDE-001](SIDE-001_SOURCE_FREEZE.md)、[SIDE-002](SIDE-002_FOUNDATION.md)
 
@@ -168,7 +168,7 @@ pnpm smoke:s0
 
 ### SIDE-010 - Paper estimate broker
 
-状态：**COMPLETE · PAPER ONLY · VOLATILE RECORDS UNTIL SIDE-011**；验收记录见 [SIDE-010](SIDE-010_PAPER_ESTIMATE_BROKER.md)。
+状态：**COMPLETE · PAPER ONLY · DURABILITY DELIVERED BY SIDE-011**；验收记录见 [SIDE-010](SIDE-010_PAPER_ESTIMATE_BROKER.md)。
 
 依赖：SIDE-002、SIDE-003；LIVE record 依赖至少三个 fresh juries。
 
@@ -183,9 +183,11 @@ pnpm smoke:s0
 
 退出条件：success/429/timeout/schema drift/expired/mixed-provider/automatic-fallback tests 通过；静态扫描确认没有 live execution path。
 
-实现说明：preview/order 当前只在有界进程内存中保留脱敏记录，并明确标记 `memory-side-010`；SIDE-011 负责 Postgres persistence、decision journal 与 markout。
+历史实现说明：SIDE-010 最初只在有界进程内存中保留脱敏记录；该边界已由 SIDE-011 的 PostgreSQL journal 与 markout worker 取代。
 
 ### SIDE-011 - Decision journal and +5m markout
+
+状态：**COMPLETE · POSTGRES DURABLE · PAPER ONLY**；验收记录见 [SIDE-011](SIDE-011_DECISION_JOURNAL_MARKOUT.md)。
 
 依赖：SIDE-004、SIDE-009、SIDE-010。
 
@@ -247,7 +249,7 @@ flowchart LR
 
 - KuCoin、OKX、SOL-USDT；
 - direct Solana RPC/program parser；
-- continuous Jupiter/0x quote；
+- 高频、无界或用于 signal 的 Jupiter/0x quote；当前只允许页面活跃时 5 秒共享 0x display sampler，Jupiter 仍不得自动调用；
 - 多资产、timeframe picker、策略编辑器；
 - 跨 USDC/USDT/USD 的绝对价格或 volume 合并；
 - ML、已验证 alpha 或稳定因果 lead/lag 声明；
@@ -259,7 +261,7 @@ flowchart LR
 ## 6. 最终 S0 Definition of Done
 
 - [ ] 全新 checkout 使用四条目标命令完成安装、检查、启动和 smoke；
-- [ ] 无 secret 的 REPLAY flow 可完成 verdict → paper decision → markout/unscored；
+- [x] 无 secret 的 REPLAY flow 可完成 verdict → paper decision → markout/unscored；
 - [ ] LIVE mode 只使用已选中的原子 CEX profile、Hyperliquid、Bitquery；
 - [ ] 少于三个 fresh juries 时为 `INSUFFICIENT_DATA` 且 live preview 禁用；
 - [ ] 0x primary / explicit Jupiter fallback 行为与审计字段通过测试；

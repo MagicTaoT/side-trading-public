@@ -21,7 +21,8 @@ describe("S0 runtime HTTP surface", () => {
     expect((await app.inject({ method: "GET", url: "/health/live" })).json()).toEqual({ status: "ok" });
     expect((await app.inject({ method: "GET", url: "/health/ready" })).json()).toEqual({
       status: "ready",
-      mode: "REPLAY"
+      mode: "REPLAY",
+      paperPersistence: "memory-side-011-test"
     });
     expect((await app.inject({ method: "GET", url: "/health/sources" })).json()).toEqual({
       mode: "REPLAY",
@@ -123,8 +124,66 @@ describe("S0 runtime HTTP surface", () => {
     });
     expect(orderResponse.statusCode).toBe(201);
     const order = orderResponse.json().order;
-    expect(order).toMatchObject({ executionMode: "paper", action: "SELL", previewId: preview.previewId });
+    expect(order).toMatchObject({
+      executionMode: "paper",
+      persistence: "memory-side-011-test",
+      action: "SELL",
+      previewId: preview.previewId,
+      markout: { status: "PENDING", horizonMs: 300_000 }
+    });
     expect((await app.inject({ method: "GET", url: `/api/paper-orders/${encodeURIComponent(order.orderId)}` })).json().order)
       .toEqual(order);
+    expect((await app.inject({ method: "GET", url: "/api/paper-orders" })).json().orders).toHaveLength(1);
+    expect((await app.inject({ method: "GET", url: "/api/shadow-performance" })).json().performance)
+      .toMatchObject({ pendingCount: 1, sellCount: 1, scoredCount: 0 });
+
+    const deleted = await app.inject({ method: "DELETE", url: `/api/paper-orders/${encodeURIComponent(order.orderId)}` });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toEqual({ deleted: true, orderId: order.orderId });
+    expect((await app.inject({ method: "GET", url: `/api/paper-orders/${encodeURIComponent(order.orderId)}` })).statusCode).toBe(404);
+    expect((await app.inject({ method: "GET", url: "/api/paper-orders" })).json().orders).toEqual([]);
+    expect((await app.inject({ method: "GET", url: "/api/shadow-performance" })).json().performance)
+      .toMatchObject({ pendingCount: 0, sellCount: 0, scoredCount: 0 });
+    expect((await app.inject({ method: "DELETE", url: `/api/paper-orders/${encodeURIComponent(order.orderId)}` })).statusCode).toBe(404);
+
+    const recreated = await app.inject({
+      method: "POST",
+      url: "/api/paper-orders",
+      payload: {
+        action: "SELL",
+        provider: "zeroex",
+        previewId: preview.previewId,
+        idempotencyKey: "http-record-0001"
+      }
+    });
+    expect(recreated.statusCode).toBe(201);
+    expect(recreated.json().order.orderId).not.toBe(order.orderId);
+  });
+
+  it("serves a shared five-second display-only BUY/SELL price board", async () => {
+    const app = await createApp({ replayJsonl });
+    apps.push(app);
+    await app.inject({ method: "POST", url: "/api/replay/start" });
+
+    const response = await app.inject({ method: "GET", url: "/api/paper-prices" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().prices).toMatchObject({
+      mode: "REPLAY",
+      pair: "SOL-USDC",
+      targetNotionalQuote: "10000",
+      refreshIntervalMs: 5000,
+      buy: {
+        status: "LIVE",
+        priceQuotePerSol: "176.335743",
+        source: "replay-estimate",
+        recordable: false
+      },
+      sell: {
+        status: "LIVE",
+        priceQuotePerSol: "175.454065",
+        source: "replay-estimate",
+        recordable: false
+      }
+    });
   });
 });

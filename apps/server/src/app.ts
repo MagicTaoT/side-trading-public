@@ -3,6 +3,9 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { LiveCoordinator } from "./live/coordinator.js";
 import { PaperEstimateBroker, PaperPolicyError } from "./paper/broker.js";
 import type { PaperAction, PaperProvider, PaperSide } from "./paper/contracts.js";
+import { MemoryDecisionJournal, type DecisionJournal } from "./paper/journal.js";
+import { MarkoutWorker } from "./paper/markout.js";
+import { PaperPriceBoard } from "./paper/price-board.js";
 import { JupiterQuoteProvider, ReplayQuoteProvider, ZeroExQuoteProvider } from "./paper/providers.js";
 import { S0Runtime } from "./runtime.js";
 import type { RuntimeMode } from "./contracts.js";
@@ -23,6 +26,7 @@ export interface CreateAppOptions {
     fetchImpl?: typeof fetch;
   };
   paperBroker?: PaperEstimateBroker;
+  journal?: DecisionJournal;
 }
 
 const MAX_SOCKET_BUFFER_BYTES = 256 * 1024;
@@ -63,9 +67,12 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     apiKey,
     ...(options.paper?.fetchImpl ? { fetchImpl: options.paper.fetchImpl } : {})
   });
+  const journal = options.journal ?? options.paperBroker?.journal ?? new MemoryDecisionJournal();
   const paper = options.paperBroker ?? new PaperEstimateBroker({
     mode,
     evidence,
+    journal,
+    reference: (evaluatedAtMs) => runtime.bitqueryReference(evaluatedAtMs),
     ...(mode === "REPLAY"
       ? { zeroex: new ReplayQuoteProvider() }
       : options.paper?.zeroexApiKey
@@ -74,6 +81,18 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     ...(options.paper?.jupiterApiKey
       ? { jupiter: new JupiterQuoteProvider(providerOptions(options.paper.jupiterApiKey)) }
       : {})
+  });
+  await paper.journal.initialize();
+  const paperPrices = new PaperPriceBoard({
+    mode,
+    broker: paper,
+    dryReference: (evaluatedAtMs) => runtime.paperDryReference(evaluatedAtMs)
+  });
+  const markoutWorker = new MarkoutWorker({
+    journal: paper.journal,
+    reference: paper.reference,
+    onComplete: (markout) => runtime.publishMarkout(markout),
+    onError: (reason) => app.log.error({ err: reason }, "Paper markout worker failed")
   });
   const live = mode === "LIVE" && options.live
     ? new LiveCoordinator({
@@ -96,9 +115,20 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   await app.register(websocket);
 
   app.get("/health/live", async () => ({ status: "ok" as const }));
-  app.get("/health/ready", async () => ({ status: "ready" as const, mode: runtime.snapshot().mode }));
+  app.get("/health/ready", async () => ({
+    status: "ready" as const,
+    mode: runtime.snapshot().mode,
+    paperPersistence: paper.journal.persistence
+  }));
   app.get("/health/sources", async () => ({ mode: runtime.snapshot().mode, sources: runtime.snapshot().sources }));
   app.get("/api/state", async () => runtime.snapshot());
+  app.get("/api/paper-prices", async (_request, reply) => {
+    try {
+      return reply.send({ prices: await paperPrices.current() });
+    } catch (reason) {
+      return paperError(reply, reason);
+    }
+  });
 
   app.post("/api/paper-orders/preview", { bodyLimit: 8 * 1024 }, async (request, reply) => {
     try {
@@ -143,9 +173,28 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   });
 
   app.get<{ Params: { id: string } }>("/api/paper-orders/:id", async (request, reply) => {
-    const order = paper.getOrder(request.params.id);
+    const order = await paper.getOrder(request.params.id);
     return order ? reply.send({ order }) : reply.code(404).send({ error: { code: "PAPER_ORDER_NOT_FOUND" } });
   });
+
+  app.delete<{ Params: { id: string } }>("/api/paper-orders/:id", async (request, reply) => {
+    try {
+      const deleted = await paper.deleteOrder(request.params.id);
+      return deleted
+        ? reply.send({ deleted: true, orderId: request.params.id })
+        : reply.code(404).send({ error: { code: "PAPER_ORDER_NOT_FOUND" } });
+    } catch (reason) {
+      return paperError(reply, reason);
+    }
+  });
+
+  app.get<{ Querystring: { limit?: string } }>("/api/paper-orders", async (request) => {
+    const parsed = Number.parseInt(request.query.limit ?? "50", 10);
+    const limit = Number.isSafeInteger(parsed) ? Math.min(100, Math.max(1, parsed)) : 50;
+    return { orders: await paper.listOrders(limit) };
+  });
+
+  app.get("/api/shadow-performance", async () => ({ performance: await paper.performance() }));
 
   app.post("/api/replay/start", async (_request, reply) => {
     if (mode === "LIVE") return reply.code(409).send({ accepted: false, reason: "replay_disabled_in_live_mode" });
@@ -174,6 +223,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   app.addHook("onReady", async () => {
     live?.start();
+    markoutWorker.start();
     if (live) {
       tickTimer = setInterval(() => runtime.tick(Date.now()), 1_000);
       tickTimer.unref();
@@ -181,7 +231,9 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   });
   app.addHook("onClose", async () => {
     if (tickTimer) clearInterval(tickTimer);
+    markoutWorker.stop();
     live?.stop();
+    await paper.journal.close();
   });
 
   return app;

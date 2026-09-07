@@ -12,6 +12,18 @@ import {
   seededVisual,
   VISUAL_BATCH_MS
 } from "./state.js";
+import {
+  decisionTone,
+  entryEdge,
+  signedBps,
+  signedQuote,
+  unscoredReasons,
+  winRatePercent,
+  type PaperAction,
+  type PaperApiOrder,
+  type PaperPerformanceSummary,
+  type PaperProvider
+} from "./performance.js";
 
 interface SourceState {
   provider: string;
@@ -42,8 +54,6 @@ interface LegacyPaperPreview {
   recordable: false;
   disabledReason: "PAPER_RECORD_ENTERS_SIDE_010" | "LIVE_QUOTE_NOT_REQUESTED";
 }
-
-type PaperProvider = "zeroex" | "jupiter";
 
 interface PaperQuoteFailure {
   failureId: string;
@@ -85,16 +95,35 @@ interface PaperApiPreview {
   estimatedOutputUSDC: string | null;
   minimumOutputAmount: string | null;
   referencePxQuotePerSol: string | null;
+  effectivePxQuotePerSol: string | null;
   routeSummary: string[];
   feeBreakdown: null;
 }
 
-interface PaperApiOrder {
-  orderId: string;
-  action: PaperAction;
-  executionMode: "paper";
-  persistence: "memory-side-010";
-  recordedAtMs: number;
+interface PaperDisplayPrice {
+  side: "BUY" | "SELL";
+  status: "LIVE" | "STALE" | "DRY" | "UNAVAILABLE";
+  priceQuotePerSol: string | null;
+  provider: PaperProvider | null;
+  source: "zeroex-estimate" | "replay-estimate" | "bitquery-dry" | "coinbase-dry" | null;
+  observedAtMs: number | null;
+  ageMs: number | null;
+  upstreamFailure: string | null;
+  reason: string | null;
+  dryAssumptionBps: number | null;
+  recordable: false;
+}
+
+interface PaperPriceBoardSnapshot {
+  schemaVersion: 1;
+  mode: "LIVE" | "REPLAY";
+  pair: "SOL-USDC";
+  targetNotionalQuote: "10000";
+  refreshIntervalMs: 5000;
+  refreshedAtMs: number | null;
+  nextRefreshAtMs: number | null;
+  buy: PaperDisplayPrice;
+  sell: PaperDisplayPrice;
 }
 
 interface SegmentFlowSnapshot {
@@ -131,9 +160,8 @@ type GatewayMessage =
   | { type: "source_health"; source: SourceState }
   | { type: "signal_state"; signal: SignalSnapshot }
   | { type: "flow_state"; flow: FlowWindowSnapshot }
+  | { type: "paper_markout"; markout: PaperApiOrder["markout"] }
   | { type: "resync_required"; snapshot: RuntimeSnapshot; suppressedCountByKind: Record<string, number> };
-
-type PaperAction = "BUY" | "SELL" | "WAIT";
 
 const emptyPaperPreview: LegacyPaperPreview = {
   schemaVersion: 1,
@@ -281,6 +309,19 @@ function notionalFor(events: UiEvent[]): number {
   return events.reduce((total, event) => total + Number(event.buyNotional ?? 0) + Number(event.sellNotional ?? 0), 0);
 }
 
+function eventAgeLabel(event: UiEvent, evaluatedAtMs: number): string {
+  const ageMs = Math.max(0, evaluatedAtMs - event.batchEndMs);
+  return ageMs < 1_000 ? `${ageMs}MS AGO` : `${(ageMs / 1_000).toFixed(1)}S AGO`;
+}
+
+function bubbleAuditLabel(event: UiEvent, evaluatedAtMs: number): string {
+  const notional = notionalFor([event]);
+  const px = event.minPx
+    ? `$${event.minPx}${event.maxPx && event.maxPx !== event.minPx ? `–$${event.maxPx}` : ""}`
+    : "PRICE UNAVAILABLE";
+  return `${event.sourceProvider} · ${event.instrumentId} · ${event.tradeSide ?? "unknown"} · ×${event.count} · ${notional > 0 ? money(notional) : "NOTIONAL UNAVAILABLE"} · ${px} · ${eventAgeLabel(event, evaluatedAtMs)}`;
+}
+
 function leadingLabel(events: UiEvent[], juries: JurySnapshot[]): string {
   const freshZones = new Set(juries.filter(({ dataState }) => dataState === "FRESH").map(({ segment }) => segmentMeta[segment].zone));
   const firstEconomic = events
@@ -306,6 +347,18 @@ function narrative(signal: SignalSnapshot): string {
 
 type PowerSide = "buy" | "sell";
 type PowerMarket = "spot" | "perp";
+type VisualWindowMs = 30_000 | 60_000 | 180_000 | 300_000;
+
+const visualWindowOptions: readonly { label: string; value: VisualWindowMs }[] = [
+  { label: "30S", value: 30_000 },
+  { label: "60S", value: 60_000 },
+  { label: "3M", value: 180_000 },
+  { label: "5M", value: 300_000 }
+];
+
+function visualWindowLabel(windowMs: VisualWindowMs): string {
+  return visualWindowOptions.find(({ value }) => value === windowMs)?.label ?? "60S";
+}
 
 const powerSegments: Record<PowerMarket, readonly S0Segment[]> = {
   spot: ["cex-spot", "dex-spot"],
@@ -338,6 +391,7 @@ interface PowerCellProps {
 }
 
 function PowerCell({ segment, side, jury, flow, groupNotional, events, sources, evaluatedAtMs, windowMs }: PowerCellProps) {
+  const [inspectedBubble, setInspectedBubble] = useState<string | null>(null);
   const meta = segmentMeta[segment];
   const laneEvents = events.filter(({ zone, kind, tradeSide }) =>
     zone === meta.zone && (kind === "trade" || kind === "onchain-swap") && tradeSide === side
@@ -347,6 +401,7 @@ function PowerCell({ segment, side, jury, flow, groupNotional, events, sources, 
   const providers = jury.sourceProviders.length > 0 ? jury.sourceProviders : laneEvents.map(({ sourceProvider }) => sourceProvider);
   const providerSet = [...new Set(providers)];
   const source = sources.find(({ provider }) => providerSet.includes(provider));
+  const inspectedEvent = laneEvents.find((event) => bubbleVisualKey(event) === inspectedBubble) ?? null;
 
   return (
     <section className={`power-cell ${side} ${jury.dataState.toLowerCase()}`} aria-label={`${panelLabel(segment)} ${side} power`}>
@@ -371,11 +426,23 @@ function PowerCell({ segment, side, jury, flow, groupNotional, events, sources, 
             "--bubble-opacity": bubbleAgeOpacity(event, evaluatedAtMs, windowMs).toFixed(3)
           } as CSSProperties;
           return (
-            <div className={`trade-bubble ${side}`} key={bubbleVisualKey(event)} style={style} tabIndex={0} aria-label={`${event.venueLabel} ${side}, batch ${event.count}, ${money(Number(event.maxNotional ?? 0))}`} title={`${event.venueLabel} · ${side} · ×${event.count}`}>
+            <div
+              className={`trade-bubble ${side}`}
+              key={bubbleVisualKey(event)}
+              style={style}
+              tabIndex={0}
+              aria-label={bubbleAuditLabel(event, evaluatedAtMs)}
+              title={bubbleAuditLabel(event, evaluatedAtMs)}
+              onPointerEnter={() => setInspectedBubble(bubbleVisualKey(event))}
+              onPointerLeave={() => setInspectedBubble(null)}
+              onFocus={() => setInspectedBubble(bubbleVisualKey(event))}
+              onBlur={() => setInspectedBubble(null)}
+            >
               <strong>×{event.count}</strong><span>{event.venueLabel}</span>
             </div>
           );
         })}
+        {inspectedEvent ? <div className="bubble-inspector" role="status"><strong>{inspectedEvent.sourceProvider.toUpperCase()} · {inspectedEvent.instrumentId}</strong><span>{(inspectedEvent.tradeSide ?? side).toUpperCase()} ×{inspectedEvent.count} · {notionalFor([inspectedEvent]) > 0 ? money(notionalFor([inspectedEvent])) : "NOTIONAL —"}</span><span>{inspectedEvent.minPx ? `$${inspectedEvent.minPx}${inspectedEvent.maxPx && inspectedEvent.maxPx !== inspectedEvent.minPx ? `–$${inspectedEvent.maxPx}` : ""}` : "PRICE —"} · {eventAgeLabel(inspectedEvent, evaluatedAtMs)}</span></div> : null}
       </div>
       <div className="power-cell-footer">
         <span>{providerSet.length > 0 ? providerSet.join(" + ").toUpperCase() : meta.sourceHint.toUpperCase()}</span>
@@ -392,9 +459,10 @@ interface PowerQuadrantProps {
   juries: JurySnapshot[];
   events: UiEvent[];
   sources: SourceState[];
+  visualWindowMs: VisualWindowMs;
 }
 
-function PowerQuadrant({ market, side, flow5m, juries, events, sources }: PowerQuadrantProps) {
+function PowerQuadrant({ market, side, flow5m, juries, events, sources, visualWindowMs }: PowerQuadrantProps) {
   const segments = powerSegments[market];
   const flows = segments.map((segment) => flow5m.segments.find((candidate) => candidate.segment === segment));
   const totalNotional = flows.reduce((sum, flow) => sum + sideFlow(flow, side).notional, 0);
@@ -423,7 +491,7 @@ function PowerQuadrant({ market, side, flow5m, juries, events, sources }: PowerQ
             events={events}
             sources={sources}
             evaluatedAtMs={flow5m.evaluatedAtMs}
-            windowMs={flow5m.windowMs}
+            windowMs={visualWindowMs}
           />
         ))}
       </div>
@@ -437,9 +505,10 @@ interface PowerRowProps {
   juries: JurySnapshot[];
   events: UiEvent[];
   sources: SourceState[];
+  visualWindowMs: VisualWindowMs;
 }
 
-function PowerRow({ market, flow5m, juries, events, sources }: PowerRowProps) {
+function PowerRow({ market, flow5m, juries, events, sources, visualWindowMs }: PowerRowProps) {
   const marketSegments = new Set(powerSegments[market]);
   const marketFlows = flow5m.segments.filter(({ segment }) => marketSegments.has(segment));
   const buyNotional = marketFlows.reduce((total, flow) => total + Number(flow.buyNotionalQuote), 0);
@@ -452,8 +521,8 @@ function PowerRow({ market, flow5m, juries, events, sources }: PowerRowProps) {
 
   return (
     <div className={`power-row ${market}`} style={rowStyle}>
-      <PowerQuadrant market={market} side="buy" flow5m={flow5m} juries={juries} events={events} sources={sources} />
-      <PowerQuadrant market={market} side="sell" flow5m={flow5m} juries={juries} events={events} sources={sources} />
+      <PowerQuadrant market={market} side="buy" flow5m={flow5m} juries={juries} events={events} sources={sources} visualWindowMs={visualWindowMs} />
+      <PowerQuadrant market={market} side="sell" flow5m={flow5m} juries={juries} events={events} sources={sources} visualWindowMs={visualWindowMs} />
     </div>
   );
 }
@@ -471,9 +540,163 @@ async function responseBody<T>(response: Response, field: string): Promise<T> {
   return body[field] as T;
 }
 
-interface PaperDrawerProps { action: PaperAction; mode: "LIVE" | "REPLAY"; freshJuryCount: number; onClose: () => void; }
+type JournalLoadState = "loading" | "ready" | "error";
 
-function PaperDrawer({ action, mode, freshJuryCount, onClose }: PaperDrawerProps) {
+function referenceLabel(reference: PaperApiOrder["markout"]["entryReference"] | null): string {
+  if (!reference || reference.status !== "READY" || reference.priceQuotePerSol === null) return reference?.reason ?? "—";
+  return `$${Number(reference.priceQuotePerSol).toFixed(2)} · N${reference.sampleCount}`;
+}
+
+function historyResult(order: PaperApiOrder, nowMs: number): string {
+  if (order.markout.status === "PENDING") {
+    return `DUE ${Math.max(0, Math.ceil((order.markout.dueAtMs - nowMs) / 1_000))}S`;
+  }
+  if (order.markout.status === "UNSCORED") return order.markout.reason ?? "UNSCORED";
+  return signedBps(order.markout.directionalMarkoutBps);
+}
+
+interface ShadowPerformanceProps {
+  mode: "LIVE" | "REPLAY";
+  summary: PaperPerformanceSummary | null;
+  orders: PaperApiOrder[];
+  state: JournalLoadState;
+  error: string | null;
+  nowMs: number;
+  onRefresh: () => void;
+  onDelete: (orderId: string) => Promise<void>;
+}
+
+function ShadowPerformance({ mode, summary, orders, state, error, nowMs, onRefresh, onDelete }: ShadowPerformanceProps) {
+  const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
+  const [deletePending, setDeletePending] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const winRate = summary ? winRatePercent(summary) : null;
+  const reasons = summary ? unscoredReasons(summary) : [];
+  const total = summary ? summary.buyCount + summary.sellCount + summary.waitCount : 0;
+  const persistence = orders[0]?.persistence === "postgres-side-011" || (mode === "LIVE" && orders.length === 0)
+    ? "POSTGRES DURABLE"
+    : "SESSION JOURNAL";
+
+  useEffect(() => {
+    if (!deleteCandidate) return;
+    const timer = window.setTimeout(() => setDeleteCandidate(null), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [deleteCandidate]);
+
+  const requestDelete = async (orderId: string) => {
+    if (deleteCandidate !== orderId) {
+      setDeleteCandidate(orderId);
+      setDeleteError(null);
+      return;
+    }
+    setDeletePending(orderId);
+    try {
+      await onDelete(orderId);
+      setDeleteCandidate(null);
+      setDeleteError(null);
+    } catch (reason) {
+      setDeleteError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setDeletePending(null);
+    }
+  };
+
+  return (
+    <section className="shadow-panel" aria-label="Shadow performance and paper decision history" aria-busy={state === "loading"}>
+      <div className="shadow-heading">
+        <div><span className="kicker">DECISION JOURNAL · +5M</span><h2>SHADOW PERFORMANCE</h2></div>
+        <div className="shadow-heading-actions"><span className={`journal-state ${state}`}><i />{state === "loading" ? "SYNCING" : state === "error" ? "JOURNAL ERROR" : persistence}</span><button className="quiet-button" type="button" onClick={onRefresh}>REFRESH</button></div>
+      </div>
+
+      {error ? <p className="shadow-error" role="alert">{error} · persisted decisions remain authoritative.</p> : null}
+      {deleteError ? <p className="shadow-error" role="alert">DELETE FAILED · {deleteError}</p> : null}
+
+      <div className="shadow-metrics" aria-live="polite">
+        <div><span>DECISIONS</span><strong>{summary ? total : "—"}</strong><small>{summary ? `B ${summary.buyCount} · S ${summary.sellCount} · W ${summary.waitCount}` : "LOADING"}</small></div>
+        <div><span>SCORED SAMPLE</span><strong>{summary?.scoredCount ?? "—"}</strong><small>BUY / SELL ONLY</small></div>
+        <div><span>WIN RATE</span><strong>{winRate === null ? "—" : `${winRate.toFixed(1)}%`}</strong><small>{summary ? `${summary.winCount} POSITIVE` : "LOADING"}</small></div>
+        <div><span>MEAN +5M</span><strong className={summary?.meanDirectionalMarkoutBps === null || summary?.meanDirectionalMarkoutBps === undefined ? "" : Number(summary.meanDirectionalMarkoutBps) >= 0 ? "positive" : "negative"}>{summary ? signedBps(summary.meanDirectionalMarkoutBps) : "—"}</strong><small>DIRECTIONAL · GROSS</small></div>
+        <div><span>PENDING</span><strong>{summary?.pendingCount ?? "—"}</strong><small>WORKER QUEUE</small></div>
+        <div><span>UNSCORED</span><strong>{summary?.unscoredCount ?? "—"}</strong><small>EXCLUDED FROM WIN RATE</small></div>
+      </div>
+
+      <div className="unscored-strip">
+        <span>UNSCORED REASONS</span>
+        <div>{reasons.length === 0 ? <strong>NONE RECORDED</strong> : reasons.map(({ reason, count }) => <strong key={reason}>{reason.replaceAll("_", " ")} ×{count}</strong>)}</div>
+      </div>
+
+      <div className="decision-history">
+        <div className="decision-history-heading"><strong>RECENT DECISIONS</strong><span>{orders.length} LOADED · WAIT/UNSCORED NEVER ENTER WIN RATE</span></div>
+        <div className="decision-columns" aria-hidden="true"><span>TIME</span><span>ACTION</span><span>PROVIDER</span><span>ENTRY EDGE</span><span>ENTRY / FUTURE</span><span>+5M RESULT</span><span>PAPER PNL</span><span>DELETE</span></div>
+        {orders.length === 0 && state !== "loading" ? <p className="decision-empty">No paper decisions recorded yet.</p> : null}
+        {orders.map((order) => {
+          const tone = decisionTone(order);
+          const edge = entryEdge(order);
+          return (
+            <article className={`decision-row ${tone}`} key={order.orderId} aria-label={`${order.action} decision ${order.orderId}`}>
+              <time dateTime={new Date(order.recordedAtMs).toISOString()}>{new Date(order.recordedAtMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
+              <strong className={`decision-action ${order.action.toLowerCase()}`}>{order.action}</strong>
+              <span>{order.provider?.toUpperCase() ?? "NO QUOTE"}</span>
+              <strong className={`entry-edge ${edge.tone}`} title="Market verdict persisted when this decision was recorded">{edge.label}</strong>
+              <span className="reference-pair"><b>{referenceLabel(order.markout.entryReference)}</b><i>→</i><b>{referenceLabel(order.markout.futureReference)}</b></span>
+              <strong className="decision-result">{historyResult(order, nowMs)}</strong>
+              <strong className="decision-pnl">{order.markout.status === "SCORED" ? signedQuote(order.markout.directionalPnlQuote) : "—"}</strong>
+              <button
+                className={`decision-delete ${deleteCandidate === order.orderId ? "confirm" : ""}`}
+                type="button"
+                disabled={deletePending !== null}
+                aria-label={`${deleteCandidate === order.orderId ? "Confirm delete" : "Delete"} decision ${order.orderId}`}
+                onClick={() => void requestDelete(order.orderId)}
+              >
+                {deletePending === order.orderId ? "DELETING" : deleteCandidate === order.orderId ? "CONFIRM" : "DELETE"}
+              </button>
+            </article>
+          );
+        })}
+      </div>
+      <p className="shadow-method">Win rate = positive scored BUY/SELL ÷ all scored BUY/SELL. WAIT, missing reference, source gap and outlier outcomes remain visible but are excluded. Results are gross directional markouts, not executable P&amp;L.</p>
+    </section>
+  );
+}
+
+interface PaperPriceButtonProps {
+  side: "BUY" | "SELL";
+  price: PaperDisplayPrice | null;
+  loading: boolean;
+  nowMs: number;
+  onClick: () => void;
+}
+
+function PaperPriceButton({ side, price, loading, nowMs, onClick }: PaperPriceButtonProps) {
+  const ageMs = price?.observedAtMs === null || price?.observedAtMs === undefined
+    ? null
+    : Math.max(0, nowMs - price.observedAtMs);
+  const age = ageMs === null ? null : ageMs < 1_000 ? `${ageMs}MS` : `${(ageMs / 1_000).toFixed(1)}S`;
+  const source = !price
+    ? "AWAITING 5S SNAPSHOT"
+    : price.status === "DRY"
+      ? `DRY · ${price.source === "coinbase-dry" ? "COINBASE USD" : "BITQUERY"} ${side === "BUY" ? "+" : "−"}${price.dryAssumptionBps ?? 0}BP`
+      : price.source === "replay-estimate"
+        ? `REPLAY EST. · ${age ?? "—"}`
+        : price.status === "UNAVAILABLE"
+          ? (price.reason ?? "QUOTE UNAVAILABLE").replaceAll("_", " ")
+          : `0x ${price.status} · ${age ?? "—"}`;
+  const title = price?.status === "DRY"
+    ? `${price.source === "coinbase-dry" ? "Coinbase SOL-USD reference (USD/USDC basis not modeled)" : "Bitquery WSOL/USDC reference"} with a fixed 50 bps dry assumption. Display only; not executable or recordable.`
+    : "Five-second display estimate. Clicking requests a separate action-time quote before recording.";
+
+  return (
+    <button type="button" className={`${side === "BUY" ? "buy-action" : "sell-action"} paper-price-action`} onClick={onClick} title={title}>
+      <span>PAPER {side}</span>
+      <strong>{price?.priceQuotePerSol ? `${money(Number(price.priceQuotePerSol))}` : "—"}</strong>
+      <small>{loading ? "UPDATING · " : ""}{source}</small>
+    </button>
+  );
+}
+
+interface PaperDrawerProps { action: PaperAction; mode: "LIVE" | "REPLAY"; freshJuryCount: number; onClose: () => void; onRecorded: (order: PaperApiOrder) => void; }
+
+function PaperDrawer({ action, mode, freshJuryCount, onClose, onRecorded }: PaperDrawerProps) {
   const [preview, setPreview] = useState<PaperApiPreview | null>(null);
   const [pending, setPending] = useState(action !== "WAIT");
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -513,10 +736,35 @@ function PaperDrawer({ action, mode, freshJuryCount, onClose }: PaperDrawerProps
   }, [action, initialPreviewKey, loadPreview]);
 
   useEffect(() => {
-    if (preview?.status !== "READY") return;
+    if (action === "WAIT" || pending || order || preview?.provider === "jupiter") return;
+    const timer = window.setTimeout(() => void loadPreview("zeroex", null), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [action, loadPreview, order, pending, preview?.previewId, preview?.provider]);
+
+  useEffect(() => {
+    if (preview?.status !== "READY" && order?.markout.status !== "PENDING") return;
     const timer = window.setInterval(() => setClockMs(Date.now()), 100);
     return () => window.clearInterval(timer);
-  }, [preview?.status]);
+  }, [order?.markout.status, preview?.status]);
+
+  useEffect(() => {
+    if (!order || order.markout.status !== "PENDING") return;
+    let active = true;
+    const refresh = async () => {
+      try {
+        const response = await fetch(`/api/paper-orders/${encodeURIComponent(order.orderId)}`);
+        const current = await responseBody<PaperApiOrder>(response, "order");
+        if (active) {
+          setOrder(current);
+          if (current.markout.status !== order.markout.status) onRecorded(current);
+        }
+      } catch {
+        // The durable order remains visible; transient polling failures retry on the next interval.
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 2_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [onRecorded, order?.markout.status, order?.orderId]);
 
   const quoteAgeMs = preview?.directional
     ? Math.max(0, clockMs - Math.min(preview.directional.receivedAtMs, preview.anchor?.receivedAtMs ?? preview.directional.receivedAtMs))
@@ -540,7 +788,9 @@ function PaperDrawer({ action, mode, freshJuryCount, onClose }: PaperDrawerProps
           provider: action === "WAIT" ? null : preview?.provider ?? null
         })
       });
-      setOrder(await responseBody<PaperApiOrder>(response, "order"));
+      const recorded = await responseBody<PaperApiOrder>(response, "order");
+      setOrder(recorded);
+      onRecorded(recorded);
     } catch (reason) {
       setRequestError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -555,6 +805,11 @@ function PaperDrawer({ action, mode, freshJuryCount, onClose }: PaperDrawerProps
   const minimumOutput = preview?.minimumOutputAmount
     ? action === "BUY" ? `${Number(preview.minimumOutputAmount).toFixed(4)} SOL` : `${money(Number(preview.minimumOutputAmount))} USDC`
     : "NOT PROVIDED";
+  const markoutLabel = order?.markout.status === "PENDING"
+    ? `DUE IN ${Math.max(0, Math.ceil((order.markout.dueAtMs - clockMs) / 1_000))}S`
+    : order?.markout.status === "SCORED" && order.markout.directionalMarkoutBps
+      ? `${Number(order.markout.directionalMarkoutBps) >= 0 ? "+" : ""}${Number(order.markout.directionalMarkoutBps).toFixed(2)} BPS`
+      : order?.markout.reason ?? "UNSCORED";
 
   return (
     <div className="drawer-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -579,16 +834,17 @@ function PaperDrawer({ action, mode, freshJuryCount, onClose }: PaperDrawerProps
             {action === "SELL" ? <div><span>ANCHOR-DERIVED INPUT</span><strong>{preview?.inputAmountSOL ? `${Number(preview.inputAmountSOL).toFixed(4)} SOL` : "—"}</strong></div> : null}
             <div className="emphasis-row"><span>ESTIMATED OUTPUT</span><strong>{pending ? "REQUESTING" : output}</strong></div>
             <div><span>MINIMUM OUTPUT</span><strong>{minimumOutput}</strong></div>
-            <div><span>REFERENCE PX</span><strong>{preview?.referencePxQuotePerSol ? `${money(Number(preview.referencePxQuotePerSol))} / SOL` : "—"}</strong></div>
+            <div><span>ESTIMATED EXECUTION PX</span><strong>{preview?.effectivePxQuotePerSol ? `${money(Number(preview.effectivePxQuotePerSol))} / SOL` : "—"}</strong></div>
+            <div><span>ANCHOR / REFERENCE PX</span><strong>{preview?.referencePxQuotePerSol ? `${money(Number(preview.referencePxQuotePerSol))} / SOL` : "—"}</strong></div>
             <div><span>PRICE IMPACT</span><strong>{preview?.directional?.provider === "jupiter" ? "PROVIDER ESTIMATE" : "NOT PROVIDED BY 0x"}</strong></div>
             <div><span>FEE BREAKDOWN</span><strong>UNKNOWN · NOT FABRICATED</strong></div>
           </div>
         )}
         {preview?.status === "READY" ? <details open><summary>ESTIMATE AUDIT</summary><ul>{preview.routeSummary.map((line) => <li key={line}>{line}</li>)}{preview.anchor ? <li>Anchor request: {preview.anchor.requestId}</li> : null}{preview.directional ? <li>Directional request: {preview.directional.requestId}</li> : null}<li>Raw responses discarded after SHA-256 hashing</li></ul></details> : null}
         {canFallback ? <button className="fallback-button" type="button" disabled={pending} onClick={() => void loadPreview("jupiter", preview.failure?.failureId ?? null)}>TRY JUPITER ESTIMATE</button> : null}
-        {action !== "WAIT" && (!preview || preview.status === "UNAVAILABLE" || !quoteFresh) ? <button className="refresh-button" type="button" disabled={pending} onClick={() => void loadPreview("zeroex", null)}>REFRESH 0x ESTIMATE</button> : null}
+        {action !== "WAIT" && (!preview || preview.status === "UNAVAILABLE" || !quoteFresh) ? <button className="refresh-button" type="button" disabled={pending} onClick={() => void loadPreview("zeroex", null)}>REFRESH 0x NOW · AUTO 5S</button> : null}
         {requestError ? <p className="inline-warning" role="alert">{requestError}</p> : null}
-        {order ? <p className="record-success"><strong>RECORDED · {order.action}</strong><span>{order.orderId} · volatile until SIDE-011 persistence</span></p> : null}
+        {order ? <p className={`record-success ${order.markout.status.toLowerCase()}`}><strong>PERSISTED · {order.action} · ENTRY {entryEdge(order).label} · +5M {order.markout.status} · {markoutLabel}</strong><span>{order.orderId} · {order.persistence}{order.markout.entryReference.priceQuotePerSol ? ` · entry $${Number(order.markout.entryReference.priceQuotePerSol).toFixed(2)} from ${order.markout.entryReference.sampleCount} Bitquery swaps` : ` · entry reference ${order.markout.entryReference.reason ?? "unavailable"}`}</span></p> : null}
         <button className="record-button" type="button" disabled={!canRecord || pending || recordPending || order !== null} onClick={() => void record()}>{recordPending ? "RECORDING" : order ? "RECORDED" : action === "WAIT" ? "RECORD WAIT" : `RECORD PAPER ${action}`}</button>
         <p className="disabled-note">Paper evidence only. No wallet, signer, assembly, simulation or send path exists.</p>
       </aside>
@@ -603,12 +859,92 @@ export function App() {
   const [motionPaused, setMotionPaused] = useState(false);
   const [pageHidden, setPageHidden] = useState(false);
   const [paperAction, setPaperAction] = useState<PaperAction | null>(null);
+  const [paperOrders, setPaperOrders] = useState<PaperApiOrder[]>([]);
+  const [performance, setPerformance] = useState<PaperPerformanceSummary | null>(null);
+  const [journalState, setJournalState] = useState<JournalLoadState>("loading");
+  const [journalError, setJournalError] = useState<string | null>(null);
+  const [journalClockMs, setJournalClockMs] = useState(Date.now());
+  const [paperPrices, setPaperPrices] = useState<PaperPriceBoardSnapshot | null>(null);
+  const [paperPricesLoading, setPaperPricesLoading] = useState(true);
+  const [paperPriceClockMs, setPaperPriceClockMs] = useState(Date.now());
+  const [visualWindowMs, setVisualWindowMs] = useState<VisualWindowMs>(60_000);
+  const [windowSwitching, setWindowSwitching] = useState(true);
 
   const loadSnapshot = useCallback(async () => {
     const response = await fetch("/api/state");
     if (!response.ok) throw new Error(`State fetch failed with HTTP ${response.status}`);
     setSnapshot((await response.json()) as RuntimeSnapshot);
   }, []);
+
+  const loadJournal = useCallback(async () => {
+    setJournalState((current) => current === "ready" ? "ready" : "loading");
+    try {
+      const [ordersResponse, performanceResponse] = await Promise.all([
+        fetch("/api/paper-orders?limit=12"),
+        fetch("/api/shadow-performance")
+      ]);
+      const [orders, nextPerformance] = await Promise.all([
+        responseBody<PaperApiOrder[]>(ordersResponse, "orders"),
+        responseBody<PaperPerformanceSummary>(performanceResponse, "performance")
+      ]);
+      setPaperOrders(orders);
+      setPerformance(nextPerformance);
+      setJournalClockMs(Date.now());
+      setJournalError(null);
+      setJournalState("ready");
+    } catch (reason) {
+      setJournalError(reason instanceof Error ? reason.message : String(reason));
+      setJournalState("error");
+    }
+  }, []);
+
+  const loadPaperPrices = useCallback(async () => {
+    setPaperPricesLoading(true);
+    try {
+      const response = await fetch("/api/paper-prices");
+      setPaperPrices(await responseBody<PaperPriceBoardSnapshot>(response, "prices"));
+      setPaperPriceClockMs(Date.now());
+    } catch {
+      // Keep the last display snapshot visible; the next five-second cycle retries.
+    } finally {
+      setPaperPricesLoading(false);
+    }
+  }, []);
+
+  const handleRecorded = useCallback((order: PaperApiOrder) => {
+    setPaperOrders((current) => [order, ...current.filter(({ orderId }) => orderId !== order.orderId)].slice(0, 12));
+    setJournalClockMs(Date.now());
+    void loadJournal();
+  }, [loadJournal]);
+
+  const deletePaperOrder = useCallback(async (orderId: string) => {
+    const response = await fetch(`/api/paper-orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });
+    await responseBody<string>(response, "orderId");
+    setPaperOrders((current) => current.filter((order) => order.orderId !== orderId));
+    await loadJournal();
+  }, [loadJournal]);
+
+  useEffect(() => {
+    setWindowSwitching(true);
+    const timer = window.setTimeout(() => setWindowSwitching(false), 850);
+    return () => window.clearTimeout(timer);
+  }, [visualWindowMs]);
+
+  useEffect(() => {
+    void loadJournal();
+    const timer = window.setInterval(() => {
+      setJournalClockMs(Date.now());
+      void loadJournal();
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [loadJournal]);
+
+  useEffect(() => {
+    void loadPaperPrices();
+    const quoteTimer = window.setInterval(() => void loadPaperPrices(), 5_000);
+    const clockTimer = window.setInterval(() => setPaperPriceClockMs(Date.now()), 1_000);
+    return () => { window.clearInterval(quoteTimer); window.clearInterval(clockTimer); };
+  }, [loadPaperPrices]);
 
   useEffect(() => {
     let active = true;
@@ -643,20 +979,28 @@ export function App() {
         else if (message.type === "source_health") setSnapshot((current) => ({ ...current, sources: upsertSource(current.sources, message.source) }));
         else if (message.type === "signal_state") setSnapshot((current) => ({ ...current, signal: message.signal }));
         else if (message.type === "flow_state") setSnapshot((current) => ({ ...current, flow5m: message.flow }));
+        else if (message.type === "paper_markout") {
+          setPaperOrders((current) => current.map((order) => order.orderId === message.markout.decisionId ? { ...order, markout: message.markout } : order));
+          void loadJournal();
+        }
       } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     });
     return () => { active = false; if (flushTimer !== undefined) window.clearTimeout(flushTimer); socket.close(); };
-  }, [loadSnapshot]);
+  }, [loadJournal, loadSnapshot]);
 
   useEffect(() => {
     const handleVisibility = () => {
       const hidden = document.hidden;
       setPageHidden(hidden);
-      if (!hidden) void loadSnapshot().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
+      if (!hidden) {
+        void loadSnapshot().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
+        void loadJournal();
+        void loadPaperPrices();
+      }
     };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, [loadSnapshot]);
+  }, [loadJournal, loadPaperPrices, loadSnapshot]);
 
   useEffect(() => {
     if (paperAction === null) return;
@@ -678,7 +1022,11 @@ export function App() {
     [snapshot.recentUiEvents, snapshot.flow5m.evaluatedAtMs, snapshot.flow5m.windowMs]
   );
   const batches = useMemo(() => microBatchUiEvents(windowedEvents), [windowedEvents]);
-  const bubbleBatches = useMemo(() => microBatchBubbleEvents(windowedEvents), [windowedEvents]);
+  const bubbleWindowEvents = useMemo(
+    () => pruneUiEvents(windowedEvents, snapshot.flow5m.evaluatedAtMs, visualWindowMs),
+    [snapshot.flow5m.evaluatedAtMs, visualWindowMs, windowedEvents]
+  );
+  const bubbleBatches = useMemo(() => microBatchBubbleEvents(bubbleWindowEvents), [bubbleWindowEvents]);
   const leading = useMemo(() => leadingLabel(batches, snapshot.signal.juries), [batches, snapshot.signal.juries]);
   const sourceQuality = snapshot.sources.some(({ quality }) => quality !== "fresh") ? "DEGRADED" : snapshot.sources.length > 0 ? "FRESH" : "WAITING";
   const verdict = snapshot.signal.verdict;
@@ -690,10 +1038,16 @@ export function App() {
   const sellPowerPercent = 100 - buyPowerPercent;
 
   return (
-    <main className={suspended ? "motion-suspended" : ""}>
+    <main className={[suspended ? "motion-suspended" : "", windowSwitching ? "window-switching" : ""].filter(Boolean).join(" ")}>
       <header className="topbar">
-        <div className="brand-block"><strong className="brand">SIDE</strong><span className="instrument">SOL / USD</span><span className="window-label">5 MIN DECISION WINDOW</span></div>
-        <div className="status-strip" aria-label="Runtime status"><span className="data-age">DATA AGE <strong>{dataAge(snapshot.sources, snapshot.flow5m.evaluatedAtMs)}</strong></span><strong className="mode-pill">{snapshot.mode}</strong><span className="paper-pill">PAPER MODE</span><span className={`connection-state ${connection.toLowerCase()}`}><i />{connection}</span><span className={`quality-state ${sourceQuality.toLowerCase()}`}>{sourceQuality}</span></div>
+        <div className="brand-block"><strong className="brand">SIDE</strong><span className="instrument">SOL / USD</span><span className="window-label">30S EDGE · {visualWindowLabel(visualWindowMs)} BUBBLES</span></div>
+        <div className="status-strip" aria-label="Runtime status">
+          <div className="visual-window-control" role="group" aria-label="Bubble display window">
+            <span>BUBBLES</span>
+            {visualWindowOptions.map(({ label, value }) => <button type="button" key={value} aria-pressed={visualWindowMs === value} onClick={() => { if (value !== visualWindowMs) { setWindowSwitching(true); setVisualWindowMs(value); } }}>{label}</button>)}
+          </div>
+          <span className="data-age">DATA AGE <strong>{dataAge(snapshot.sources, snapshot.flow5m.evaluatedAtMs)}</strong></span><strong className="mode-pill">{snapshot.mode}</strong><span className="paper-pill">PAPER MODE</span><span className={`connection-state ${connection.toLowerCase()}`}><i />{connection}</span><span className={`quality-state ${sourceQuality.toLowerCase()}`}>{sourceQuality}</span>
+        </div>
       </header>
 
       <section className="runtime-bar" aria-label={`${snapshot.mode} runtime controls`}>
@@ -709,10 +1063,10 @@ export function App() {
 
       <section className="cockpit" aria-label="SOL cross-market cockpit">
         <div className="power-board">
-          <PowerRow market="spot" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
+          <PowerRow market="spot" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} visualWindowMs={visualWindowMs} />
           <article className={`verdict-card ${verdictClass(verdict.verdict)}`} aria-label="Market verdict">
             <div className="verdict-side-action buy">
-              <button type="button" className="buy-action" onClick={() => setPaperAction("BUY")}>PAPER BUY</button>
+              <PaperPriceButton side="BUY" price={paperPrices?.buy ?? null} loading={paperPricesLoading} nowMs={paperPriceClockMs} onClick={() => setPaperAction("BUY")} />
             </div>
             <div className="verdict-main">
               <div className="verdict-summary">
@@ -729,10 +1083,10 @@ export function App() {
               </div>
             </div>
             <div className="verdict-side-action sell">
-              <button type="button" className="sell-action" onClick={() => setPaperAction("SELL")}>PAPER SELL</button>
+              <PaperPriceButton side="SELL" price={paperPrices?.sell ?? null} loading={paperPricesLoading} nowMs={paperPriceClockMs} onClick={() => setPaperAction("SELL")} />
             </div>
           </article>
-          <PowerRow market="perp" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
+          <PowerRow market="perp" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} visualWindowMs={visualWindowMs} />
         </div>
       </section>
 
@@ -750,12 +1104,23 @@ export function App() {
       </section>
 
       <section className="activity-rail" aria-label="Visual micro batches">
-        <div className="activity-heading"><div><span className="kicker">EVENT PULSE</span><h2>75MS VISUAL MICRO-BATCHES</h2></div><span>{snapshot.eventsIngested} canonical · {bubbleBatches.length} trade bubbles · rolling 5m</span></div>
+        <div className="activity-heading"><div><span className="kicker">EVENT PULSE</span><h2>75MS VISUAL MICRO-BATCHES</h2></div><span>{snapshot.eventsIngested} canonical · {bubbleBatches.length} trade bubbles · rolling {visualWindowLabel(visualWindowMs).toLowerCase()}</span></div>
         <div className="batch-list">
           {batches.length === 0 ? <p>{snapshot.mode === "LIVE" ? "Waiting for the first real market update." : "Run the golden replay to populate venue-local effects."}</p> : null}
           {[...batches].reverse().slice(0, 8).map((event) => <div className={`batch-row ${event.changeDirection}`} key={`${event.eventId}:${event.streamSeq}`}><span>{event.streamSeq}</span><strong>{event.venueLabel}</strong><span>{event.instrumentId}</span><span>{event.kind}</span><b>×{event.count}</b><span>B {event.buyCount ?? 0} / S {event.sellCount ?? 0}</span><span>{notionalFor([event]) > 0 ? money(notionalFor([event])) : "STATE UPDATE"}</span><span>{event.minPx ? `${event.minPx}${event.maxPx !== event.minPx ? `–${event.maxPx}` : ""}` : "—"}</span></div>)}
         </div>
       </section>
+
+      <ShadowPerformance
+        mode={snapshot.mode}
+        summary={performance}
+        orders={paperOrders}
+        state={journalState}
+        error={journalError}
+        nowMs={journalClockMs}
+        onRefresh={() => void loadJournal()}
+        onDelete={deletePaperOrder}
+      />
 
       <section className="source-coverage" aria-label="Source coverage">
         <div><span className="kicker">SOURCE / PROFILE</span><h2>LIMITED S0 COVERAGE</h2></div>
@@ -764,7 +1129,7 @@ export function App() {
       </section>
 
       <footer><span>{snapshot.mode === "LIVE" ? "S0 · LIVE INGEST" : "R0 · REPLAY RUNNABLE"}</span><span>Motion {suspended ? "paused" : "active"} · seeded by event ID · hidden-page snapshot recovery</span></footer>
-      {paperAction ? <PaperDrawer action={paperAction} mode={snapshot.mode} freshJuryCount={verdict.freshJuryCount} onClose={() => setPaperAction(null)} /> : null}
+      {paperAction ? <PaperDrawer action={paperAction} mode={snapshot.mode} freshJuryCount={verdict.freshJuryCount} onClose={() => setPaperAction(null)} onRecorded={handleRecorded} /> : null}
     </main>
   );
 }

@@ -36,7 +36,7 @@
 - `minPx`、`maxPx`；
 - 已存在的 count、buy/sell count、buy/sell/max notional 由 runtime 填充。
 
-event rail 按 `zone + source + venue + instrument + quote + kind` 做 75 ms 分桶。不同 venue 不合并；混合方向保留 buy/sell 两侧数据并显示为 flat，而不是只保留净方向。成交 bubble 另按 side-specific lane 分桶，以首个 canonical event id 作为稳定视觉身份：首次入场播放一次 0.8 秒、继承 BUY/SELL 颜色的外扩高光圈；opacity 在前 2.5 分钟由 85% 降至 30%，随后在 5 分钟边界前降至 10%，到期移除。高频非成交 state event 继续受每 zone 50-event hard bound 约束。
+event rail 按 `zone + source + venue + instrument + quote + kind` 做 75 ms 分桶。不同 venue 不合并；混合方向保留 buy/sell 两侧数据并显示为 flat，而不是只保留净方向。成交 bubble 另按 side-specific lane 分桶，以首个 canonical event id 作为稳定视觉身份：首次入场播放一次 0.8 秒、继承 BUY/SELL 颜色的外扩高光圈。用户可独立选择 30s、60s、3m 或 5m 的 bubble visual window（默认 60s）；opacity 在所选窗口的前半段由 85% 降至 30%，随后在窗口边界前降至 10%，到期移除。切换窗口只改变视觉留存，不改变 30 秒 signal/verdict 或 5 分钟 realized-flow 布局口径。高频非成交 state event 继续受每 zone 50-event hard bound 约束。
 
 布局采用分层 volume 权重：Spot/Perp 保持等高以便比较；每行 BUY/SELL 按该 market 的 5m realized volume 分配宽度并 clamp 到 35%–65%；每个象限内的两个 source panel 再按各自 volume 分配宽度并 clamp 到 30%–70%。比例量化到 0.5 percentage point，并使用平滑 CSS transition，避免逐笔微小变化造成视觉抖动。verdict bar 位于 SPOT 与 PERP 行之间的正常文档流中，始终全宽且不随分界线移动。
 
@@ -68,7 +68,7 @@ Bitquery realized swap 与 0x-shaped preview contract 分开呈现，前者不�
 
 - SIDE-005 不接 live venue；source preflight 与 profile selection 从 SIDE-006 开始；
 - frozen preview 只证明 UI contract，0x live estimate adapter 属于 SIDE-009；
-- paper decision persistence 与 markout 属于 SIDE-010；
+- paper estimate broker 属于 SIDE-010；decision persistence 与 markout 属于 SIDE-011；
 - 当前 bubble history 只保留 rolling 5m；非成交 state history 仍 bounded，不引入长期图表、策略编辑器或真实执行。
 
 SIDE-005 完成后，第一个可运行里程碑成立：**R0 · REPLAY RUNNABLE**。
