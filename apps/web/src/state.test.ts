@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { UiEvent } from "@side/market-core";
-import { mergeUiEvent, microBatchUiEvents, seededVisual } from "./state.js";
+import {
+  bubbleAgeOpacity,
+  bubbleVisualKey,
+  mergeUiEvent,
+  microBatchBubbleEvents,
+  microBatchUiEvents,
+  pruneUiEvents,
+  seededVisual
+} from "./state.js";
 
 const event: UiEvent = {
   eventId: "coinbase:trade:100",
@@ -32,18 +40,24 @@ describe("mergeUiEvent", () => {
     expect(duplicate).toEqual({ events: [event], added: false });
   });
 
-  it("appends a new event and enforces the bounded history", () => {
+  it("keeps trade bubbles even when the bounded state-event history is full", () => {
     const next = { ...event, eventId: "coinbase:trade:101", streamSeq: "101" };
     const merged = mergeUiEvent([event], next, 1);
 
-    expect(merged).toEqual({ events: [next], added: true });
+    expect(merged).toEqual({ events: [event, next], added: true });
   });
 
-  it("retains an independent bounded history for each market zone", () => {
-    const dex = { ...event, eventId: "bitquery:swap:1", streamSeq: "101", sourceProvider: "bitquery" as const, zone: "dex-spot" as const };
-    const nextSpot = { ...event, eventId: "coinbase:trade:102", streamSeq: "102" };
+  it("retains an independent bounded state-event history for each market zone", () => {
+    const bbo = { ...event, eventId: "coinbase:bbo:1", kind: "bbo" as const, tradeSide: "unknown" as const };
+    const dex = { ...bbo, eventId: "bitquery:quote:1", streamSeq: "101", sourceProvider: "bitquery" as const, zone: "dex-spot" as const };
+    const nextSpot = { ...bbo, eventId: "coinbase:bbo:2", streamSeq: "102" };
 
-    expect(mergeUiEvent([event, dex], nextSpot, 1).events).toEqual([dex, nextSpot]);
+    expect(mergeUiEvent([bbo, dex], nextSpot, 1).events).toEqual([dex, nextSpot]);
+  });
+
+  it("expires an event only after its five-minute window has passed", () => {
+    expect(pruneUiEvents([event], 300_999)).toEqual([event]);
+    expect(pruneUiEvents([event], 301_000)).toEqual([]);
   });
 });
 
@@ -103,5 +117,30 @@ describe("seededVisual", () => {
     expect(seededVisual(event).xPercent).toBeLessThanOrEqual(85);
     expect(seededVisual(event).diameterPx).toBeGreaterThanOrEqual(22);
     expect(seededVisual(event).diameterPx).toBeLessThanOrEqual(72);
+  });
+
+  it("keeps a bubble identity stable while its micro-batch is updated", () => {
+    const updated = { ...event, streamSeq: "101", count: 2, batchEndMs: 1_050 };
+    expect(bubbleVisualKey(updated)).toBe(bubbleVisualKey(event));
+  });
+
+  it("fades a bubble gradually across the five-minute window", () => {
+    expect(bubbleAgeOpacity(event, event.batchEndMs)).toBeCloseTo(0.82);
+    expect(bubbleAgeOpacity(event, event.batchEndMs + 150_000)).toBeCloseTo(0.6089, 3);
+    expect(bubbleAgeOpacity(event, event.batchEndMs + 300_000)).toBeCloseTo(0.18);
+  });
+});
+
+describe("microBatchBubbleEvents", () => {
+  it("updates an existing side-specific bubble across interleaved state events", () => {
+    const bbo = { ...event, eventId: "coinbase:bbo:1", streamSeq: "101", kind: "bbo" as const, tradeSide: "unknown" as const, batchStartMs: 1_020, batchEndMs: 1_020 };
+    const secondBuy = { ...event, eventId: "coinbase:trade:102", streamSeq: "102", batchStartMs: 1_050, batchEndMs: 1_050 };
+    const sell = { ...event, eventId: "coinbase:trade:103", streamSeq: "103", tradeSide: "sell" as const, buyCount: 0, sellCount: 1, batchStartMs: 1_060, batchEndMs: 1_060 };
+
+    const bubbles = microBatchBubbleEvents([event, bbo, secondBuy, sell]);
+
+    expect(bubbles).toHaveLength(2);
+    expect(bubbles[0]).toMatchObject({ eventId: event.eventId, streamSeq: "102", count: 2, tradeSide: "buy" });
+    expect(bubbles[1]).toMatchObject({ eventId: sell.eventId, tradeSide: "sell" });
   });
 });

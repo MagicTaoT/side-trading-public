@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import type { UiEvent } from "@side/market-core";
 import type { JurySnapshot, S0Segment, SignalSnapshot, Verdict } from "@side/signal-engine";
-import { mergeUiEvent, microBatchUiEvents, seededVisual, VISUAL_BATCH_MS } from "./state.js";
+import {
+  bubbleAgeOpacity,
+  bubbleVisualKey,
+  mergeUiEvent,
+  microBatchBubbleEvents,
+  microBatchUiEvents,
+  pruneUiEvents,
+  seededVisual,
+  VISUAL_BATCH_MS
+} from "./state.js";
 
 interface SourceState {
   provider: string;
@@ -270,10 +279,10 @@ interface PowerCellProps {
   events: UiEvent[];
   sources: SourceState[];
   evaluatedAtMs: number;
-  visualEpoch: number;
+  windowMs: number;
 }
 
-function PowerCell({ segment, side, jury, flow, groupNotional, events, sources, evaluatedAtMs, visualEpoch }: PowerCellProps) {
+function PowerCell({ segment, side, jury, flow, groupNotional, events, sources, evaluatedAtMs, windowMs }: PowerCellProps) {
   const meta = segmentMeta[segment];
   const laneEvents = events.filter(({ zone, kind, tradeSide }) =>
     zone === meta.zone && (kind === "trade" || kind === "onchain-swap") && tradeSide === side
@@ -295,18 +304,19 @@ function PowerCell({ segment, side, jury, flow, groupNotional, events, sources, 
         <span><strong>{stats.notional > 0 ? money(stats.notional) : "—"}</strong></span>
         <span className="share"><strong>{share.toFixed(1)}%</strong></span>
       </div>
-      <div className={`bubble-field power-bubbles ${side}`} key={`${visualEpoch}:${segment}:${side}`}>
+      <div className={`bubble-field power-bubbles ${side}`}>
         {laneEvents.length === 0 ? <div className="lane-empty"><span>{jury.dataState === "FRESH" ? "LIVE · NO RECENT TRADES" : "AWAITING SOURCE"}</span><small>{meta.sourceHint}</small></div> : null}
-        {laneEvents.slice(-18).map((event) => {
+        {laneEvents.map((event) => {
           const visual = seededVisual(event);
           const style = {
             "--bubble-x": `${visual.xPercent}%`,
             "--bubble-y": `${visual.yPercent}%`,
             "--bubble-size": `${visual.diameterPx}px`,
-            "--bubble-delay": `${visual.delayMs}ms`
+            "--bubble-delay": `${visual.delayMs}ms`,
+            "--bubble-opacity": bubbleAgeOpacity(event, evaluatedAtMs, windowMs).toFixed(3)
           } as CSSProperties;
           return (
-            <div className={`trade-bubble ${side}`} key={`${event.eventId}:${event.streamSeq}`} style={style} tabIndex={0} aria-label={`${event.venueLabel} ${side}, batch ${event.count}, ${money(Number(event.maxNotional ?? 0))}`} title={`${event.venueLabel} · ${side} · ×${event.count}`}>
+            <div className={`trade-bubble ${side}`} key={bubbleVisualKey(event)} style={style} tabIndex={0} aria-label={`${event.venueLabel} ${side}, batch ${event.count}, ${money(Number(event.maxNotional ?? 0))}`} title={`${event.venueLabel} · ${side} · ×${event.count}`}>
               <strong>×{event.count}</strong><span>{event.venueLabel}</span>
             </div>
           );
@@ -327,10 +337,9 @@ interface PowerQuadrantProps {
   juries: JurySnapshot[];
   events: UiEvent[];
   sources: SourceState[];
-  visualEpoch: number;
 }
 
-function PowerQuadrant({ market, side, flow5m, juries, events, sources, visualEpoch }: PowerQuadrantProps) {
+function PowerQuadrant({ market, side, flow5m, juries, events, sources }: PowerQuadrantProps) {
   const segments = powerSegments[market];
   const flows = segments.map((segment) => flow5m.segments.find((candidate) => candidate.segment === segment));
   const totalNotional = flows.reduce((sum, flow) => sum + sideFlow(flow, side).notional, 0);
@@ -353,7 +362,7 @@ function PowerQuadrant({ market, side, flow5m, juries, events, sources, visualEp
             events={events}
             sources={sources}
             evaluatedAtMs={flow5m.evaluatedAtMs}
-            visualEpoch={visualEpoch}
+            windowMs={flow5m.windowMs}
           />
         ))}
       </div>
@@ -403,7 +412,6 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [motionPaused, setMotionPaused] = useState(false);
   const [pageHidden, setPageHidden] = useState(false);
-  const [visualEpoch, setVisualEpoch] = useState(0);
   const [paperAction, setPaperAction] = useState<PaperAction | null>(null);
 
   const loadSnapshot = useCallback(async () => {
@@ -428,7 +436,6 @@ export function App() {
         }
         return next;
       });
-      if (!document.hidden) setVisualEpoch((current) => current + 1);
     };
 
     void loadSnapshot().catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : String(reason)); });
@@ -455,7 +462,7 @@ export function App() {
     const handleVisibility = () => {
       const hidden = document.hidden;
       setPageHidden(hidden);
-      if (!hidden) void loadSnapshot().then(() => setVisualEpoch((current) => current + 1)).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
+      if (!hidden) void loadSnapshot().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
     };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);
@@ -474,10 +481,14 @@ export function App() {
     if (!response.ok) throw new Error(`Replay ${action} failed with HTTP ${response.status}`);
     const body = (await response.json()) as { snapshot: RuntimeSnapshot };
     setSnapshot(body.snapshot);
-    setVisualEpoch((current) => current + 1);
   }, []);
 
-  const batches = useMemo(() => microBatchUiEvents(snapshot.recentUiEvents), [snapshot.recentUiEvents]);
+  const windowedEvents = useMemo(
+    () => pruneUiEvents(snapshot.recentUiEvents, snapshot.flow5m.evaluatedAtMs, snapshot.flow5m.windowMs),
+    [snapshot.recentUiEvents, snapshot.flow5m.evaluatedAtMs, snapshot.flow5m.windowMs]
+  );
+  const batches = useMemo(() => microBatchUiEvents(windowedEvents), [windowedEvents]);
+  const bubbleBatches = useMemo(() => microBatchBubbleEvents(windowedEvents), [windowedEvents]);
   const leading = useMemo(() => leadingLabel(batches, snapshot.signal.juries), [batches, snapshot.signal.juries]);
   const sourceQuality = snapshot.sources.some(({ quality }) => quality !== "fresh") ? "DEGRADED" : snapshot.sources.length > 0 ? "FRESH" : "WAITING";
   const verdict = snapshot.signal.verdict;
@@ -508,10 +519,10 @@ export function App() {
 
       <section className="cockpit" aria-label="SOL cross-market cockpit">
         <div className="power-board">
-          <PowerQuadrant market="spot" side="buy" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={batches} sources={snapshot.sources} visualEpoch={visualEpoch} />
-          <PowerQuadrant market="spot" side="sell" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={batches} sources={snapshot.sources} visualEpoch={visualEpoch} />
-          <PowerQuadrant market="perp" side="buy" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={batches} sources={snapshot.sources} visualEpoch={visualEpoch} />
-          <PowerQuadrant market="perp" side="sell" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={batches} sources={snapshot.sources} visualEpoch={visualEpoch} />
+          <PowerQuadrant market="spot" side="buy" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
+          <PowerQuadrant market="spot" side="sell" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
+          <PowerQuadrant market="perp" side="buy" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
+          <PowerQuadrant market="perp" side="sell" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
         </div>
         <article className={`verdict-card ${verdictClass(verdict.verdict)}`} aria-label="Market verdict">
           <span className="kicker">MARKET VERDICT · {snapshot.signal.modelVersion.toUpperCase()}</span>
@@ -537,7 +548,7 @@ export function App() {
       </section>
 
       <section className="activity-rail" aria-label="Visual micro batches">
-        <div className="activity-heading"><div><span className="kicker">EVENT PULSE</span><h2>75MS VISUAL MICRO-BATCHES</h2></div><span>{snapshot.eventsIngested} canonical · {batches.length} visual · bounded 50 / market</span></div>
+        <div className="activity-heading"><div><span className="kicker">EVENT PULSE</span><h2>75MS VISUAL MICRO-BATCHES</h2></div><span>{snapshot.eventsIngested} canonical · {bubbleBatches.length} trade bubbles · rolling 5m</span></div>
         <div className="batch-list">
           {batches.length === 0 ? <p>{snapshot.mode === "LIVE" ? "Waiting for the first real market update." : "Run the golden replay to populate venue-local effects."}</p> : null}
           {[...batches].reverse().slice(0, 8).map((event) => <div className={`batch-row ${event.changeDirection}`} key={`${event.eventId}:${event.streamSeq}`}><span>{event.streamSeq}</span><strong>{event.venueLabel}</strong><span>{event.instrumentId}</span><span>{event.kind}</span><b>×{event.count}</b><span>B {event.buyCount ?? 0} / S {event.sellCount ?? 0}</span><span>{notionalFor([event]) > 0 ? money(notionalFor([event])) : "STATE UPDATE"}</span><span>{event.minPx ? `${event.minPx}${event.maxPx !== event.minPx ? `–${event.maxPx}` : ""}` : "—"}</span></div>)}

@@ -35,7 +35,7 @@
 - `minPx`、`maxPx`；
 - 已存在的 count、buy/sell count、buy/sell/max notional 由 runtime 填充。
 
-浏览器按 `zone + source + venue + instrument + quote + kind` 做 75 ms 分桶。不同 venue 不合并；混合方向保留 buy/sell 两侧数据并显示为 flat，而不是只保留净方向。视觉历史继续受 50-event hard bound 约束。
+event rail 按 `zone + source + venue + instrument + quote + kind` 做 75 ms 分桶。不同 venue 不合并；混合方向保留 buy/sell 两侧数据并显示为 flat，而不是只保留净方向。成交 bubble 另按 side-specific lane 分桶，以首个 canonical event id 作为稳定视觉身份：入场动画只播放一次，随后按年龄渐隐，并驻留到 rolling 5m 到期。高频非成交 state event 继续受每 zone 50-event hard bound 约束。
 
 ## 4. Paper drawer 真值边界
 
@@ -66,6 +66,6 @@ Bitquery realized swap 与 0x-shaped preview contract 分开呈现，前者不�
 - SIDE-005 不接 live venue；source preflight 与 profile selection 从 SIDE-006 开始；
 - frozen preview 只证明 UI contract，0x live estimate adapter 属于 SIDE-009；
 - paper decision persistence 与 markout 属于 SIDE-010；
-- 当前 bubble history 来自 bounded runtime snapshot，不引入长期图表、策略编辑器或真实执行。
+- 当前 bubble history 只保留 rolling 5m；非成交 state history 仍 bounded，不引入长期图表、策略编辑器或真实执行。
 
 SIDE-005 完成后，第一个可运行里程碑成立：**R0 · REPLAY RUNNABLE**。

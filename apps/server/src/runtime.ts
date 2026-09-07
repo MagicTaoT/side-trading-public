@@ -14,7 +14,7 @@ import type {
 import { BoundedGatewayQueue } from "./gateway-queue.js";
 import { IngestSequenceAllocator } from "./sequence.js";
 
-const RECENT_UI_EVENT_LIMIT_PER_ZONE = 50;
+const RECENT_STATE_EVENT_LIMIT_PER_ZONE = 50;
 const FLOW_WINDOW_MS = 300_000;
 
 interface FlowSample {
@@ -24,10 +24,31 @@ interface FlowSample {
   notionalQuote: Decimal;
 }
 
-function retainUiEventPerZone(events: UiEvent[], next: UiEvent): UiEvent[] {
-  const sameZone = events.filter(({ zone }) => zone === next.zone);
-  const removeEventId = sameZone.length >= RECENT_UI_EVENT_LIMIT_PER_ZONE ? sameZone[0]?.eventId : null;
-  return [...events.filter((event) => !(event.zone === next.zone && event.eventId === removeEventId)), next];
+function isTradeBubbleEvent(event: UiEvent): boolean {
+  return (event.kind === "trade" || event.kind === "onchain-swap") &&
+    (event.tradeSide === "buy" || event.tradeSide === "sell");
+}
+
+function pruneUiEvents(events: UiEvent[], nowMs: number): UiEvent[] {
+  const cutoff = nowMs - FLOW_WINDOW_MS;
+  return events.filter(({ batchEndMs }) => batchEndMs > cutoff);
+}
+
+function retainUiEvent(events: UiEvent[], next: UiEvent): UiEvent[] {
+  const latestEventMs = events.reduce(
+    (latest, { batchEndMs }) => Math.max(latest, batchEndMs),
+    next.batchEndMs
+  );
+  const retained = pruneUiEvents(events, latestEventMs);
+  if (isTradeBubbleEvent(next)) return [...retained, next];
+
+  const sameZoneStateEvents = retained.filter(
+    (event) => event.zone === next.zone && !isTradeBubbleEvent(event)
+  );
+  const removeEventId = sameZoneStateEvents.length >= RECENT_STATE_EVENT_LIMIT_PER_ZONE
+    ? sameZoneStateEvents[0]?.eventId
+    : null;
+  return [...retained.filter(({ eventId }) => eventId !== removeEventId), next];
 }
 
 function signalSegmentFor(event: MarketEvent): S0Segment {
@@ -232,6 +253,7 @@ export class S0Runtime {
   tick(nowMs: number): void {
     const transitions = this.#signal.tick(nowMs);
     this.#pruneFlow(nowMs);
+    this.#recentUiEvents = pruneUiEvents(this.#recentUiEvents, nowMs);
     this.#broadcast({ type: "flow_state", flow: this.#flowSnapshot() });
     if (transitions.length > 0) {
       this.#broadcast({ type: "signal_state", signal: this.#signal.snapshot() });
@@ -260,7 +282,7 @@ export class S0Runtime {
     this.#broadcast({ type: "source_health", source });
     if (event.kind !== "source-health") {
       const uiEvent = uiEventFor(event);
-      this.#recentUiEvents = retainUiEventPerZone(this.#recentUiEvents, uiEvent);
+      this.#recentUiEvents = retainUiEvent(this.#recentUiEvents, uiEvent);
       this.#broadcast({ type: "ui_event", event: uiEvent });
     }
     if (signalTransitions.length > 0) {

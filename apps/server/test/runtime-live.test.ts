@@ -63,6 +63,27 @@ describe("S0Runtime LIVE mode", () => {
       buyCount: 0,
       buyNotionalQuote: "0.00"
     });
+    expect(runtime.snapshot().recentUiEvents).toHaveLength(0);
     expect(() => runtime.startReplay()).toThrow("disabled in LIVE mode");
+  });
+
+  it("retains every economic bubble until the rolling five-minute window expires", () => {
+    const runtime = new S0Runtime("", 64, "LIVE", "coinbase");
+    for (let index = 0; index < 51; index += 1) {
+      runtime.ingestLive({
+        ...base(`coinbase:trade:${index}`, "trade", {
+          px: "100",
+          sizeNative: "1",
+          sizeSOL: "1",
+          aggressor: "buy",
+          tradeId: String(index)
+        }),
+        receivedAtUnixMs: 1_000 + index
+      });
+    }
+
+    expect(runtime.snapshot().recentUiEvents).toHaveLength(51);
+    runtime.tick(301_051);
+    expect(runtime.snapshot().recentUiEvents).toHaveLength(0);
   });
 });

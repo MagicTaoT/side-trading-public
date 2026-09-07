@@ -6,6 +6,8 @@ export interface UiEventMerge {
 }
 
 export const VISUAL_BATCH_MS = 75;
+export const UI_EVENT_WINDOW_MS = 300_000;
+const RECENT_STATE_EVENT_LIMIT_PER_ZONE = 50;
 
 const BATCHABLE_KINDS = new Set<UiEvent["kind"]>([
   "trade",
@@ -16,25 +18,54 @@ const BATCHABLE_KINDS = new Set<UiEvent["kind"]>([
   "route-change"
 ]);
 
-function eventKey(event: UiEvent): string {
-  return `${event.eventId}:${event.streamSeq}`;
+export function bubbleVisualKey(event: UiEvent): string {
+  return event.eventId;
 }
 
-export function mergeUiEvent(events: UiEvent[], next: UiEvent, limit = 50): UiEventMerge {
-  if (events.some((event) => eventKey(event) === eventKey(next))) {
-    return { events, added: false };
+export function isTradeBubbleEvent(event: UiEvent): boolean {
+  return (event.kind === "trade" || event.kind === "onchain-swap") &&
+    (event.tradeSide === "buy" || event.tradeSide === "sell");
+}
+
+export function pruneUiEvents(events: UiEvent[], evaluatedAtMs: number, windowMs = UI_EVENT_WINDOW_MS): UiEvent[] {
+  const cutoff = evaluatedAtMs - windowMs;
+  return events.filter(({ batchEndMs }) => batchEndMs > cutoff);
+}
+
+export function mergeUiEvent(
+  events: UiEvent[],
+  next: UiEvent,
+  stateEventLimit = RECENT_STATE_EVENT_LIMIT_PER_ZONE,
+  windowMs = UI_EVENT_WINDOW_MS
+): UiEventMerge {
+  const latestEventMs = events.reduce(
+    (latest, { batchEndMs }) => Math.max(latest, batchEndMs),
+    next.batchEndMs
+  );
+  const retained = pruneUiEvents(events, latestEventMs, windowMs);
+
+  if (retained.some(({ eventId }) => eventId === next.eventId)) {
+    return { events: retained, added: false };
   }
 
-  const sameZone = events.filter(({ zone }) => zone === next.zone);
-  const removeEventId = sameZone.length >= limit ? sameZone[0]?.eventId : null;
+  if (isTradeBubbleEvent(next)) return { events: [...retained, next], added: true };
+
+  const sameZoneStateEvents = retained.filter(
+    (event) => event.zone === next.zone && !isTradeBubbleEvent(event)
+  );
+  const removeEventId = sameZoneStateEvents.length >= stateEventLimit ? sameZoneStateEvents[0]?.eventId : null;
   return {
-    events: [...events.filter((event) => !(event.zone === next.zone && event.eventId === removeEventId)), next],
+    events: [...retained.filter((event) => event.eventId !== removeEventId), next],
     added: true
   };
 }
 
 function batchKey(event: UiEvent): string {
   return [event.zone, event.sourceProvider, event.venueLabel, event.instrumentId, event.quoteAsset, event.kind].join(":");
+}
+
+function bubbleBatchKey(event: UiEvent): string {
+  return `${batchKey(event)}:${event.tradeSide}`;
 }
 
 function sumDecimal(left: string | undefined, right: string | undefined): string | undefined {
@@ -98,11 +129,62 @@ export function microBatchUiEvents(events: UiEvent[], windowMs = VISUAL_BATCH_MS
   return batches;
 }
 
+export function microBatchBubbleEvents(events: UiEvent[], windowMs = VISUAL_BATCH_MS): UiEvent[] {
+  const batches: UiEvent[] = [];
+  const latestBatchByLane = new Map<string, number>();
+
+  for (const event of events.filter(isTradeBubbleEvent)) {
+    const key = bubbleBatchKey(event);
+    const previousIndex = latestBatchByLane.get(key);
+    const previous = previousIndex === undefined ? undefined : batches[previousIndex];
+    const gapMs = previous === undefined ? Number.POSITIVE_INFINITY : event.batchStartMs - previous.batchEndMs;
+    const canMerge = previous !== undefined && gapMs >= 0 && gapMs <= windowMs;
+
+    if (!canMerge || !previous || previousIndex === undefined) {
+      batches.push(event);
+      latestBatchByLane.set(key, batches.length - 1);
+      continue;
+    }
+
+    const buyNotional = sumDecimal(previous.buyNotional, event.buyNotional);
+    const sellNotional = sumDecimal(previous.sellNotional, event.sellNotional);
+    const maxNotional = maxDecimal(previous.maxNotional, event.maxNotional);
+    const minPx = minDecimal(previous.minPx, event.minPx);
+    const maxPx = maxDecimal(previous.maxPx, event.maxPx);
+
+    batches[previousIndex] = {
+      ...previous,
+      streamSeq: event.streamSeq,
+      stateVersion: event.stateVersion,
+      count: previous.count + event.count,
+      batchEndMs: Math.max(previous.batchEndMs, event.batchEndMs),
+      buyCount: (previous.buyCount ?? 0) + (event.buyCount ?? 0),
+      sellCount: (previous.sellCount ?? 0) + (event.sellCount ?? 0),
+      ...(buyNotional === undefined ? {} : { buyNotional }),
+      ...(sellNotional === undefined ? {} : { sellNotional }),
+      ...(maxNotional === undefined ? {} : { maxNotional }),
+      ...(minPx === undefined ? {} : { minPx }),
+      ...(maxPx === undefined ? {} : { maxPx })
+    };
+  }
+
+  return batches;
+}
+
 export interface SeededVisual {
   xPercent: number;
   yPercent: number;
   diameterPx: number;
   delayMs: number;
+}
+
+export function bubbleAgeOpacity(
+  event: UiEvent,
+  evaluatedAtMs: number,
+  windowMs = UI_EVENT_WINDOW_MS
+): number {
+  const ageRatio = Math.min(1, Math.max(0, (evaluatedAtMs - event.batchEndMs) / windowMs));
+  return 0.82 - Math.pow(ageRatio, 1.6) * 0.64;
 }
 
 export function seededVisual(event: UiEvent): SeededVisual {
