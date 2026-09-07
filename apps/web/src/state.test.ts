@@ -3,6 +3,7 @@ import type { UiEvent } from "@side/market-core";
 import {
   bubbleAgeOpacity,
   bubbleVisualKey,
+  clampedVolumeShare,
   mergeUiEvent,
   microBatchBubbleEvents,
   microBatchUiEvents,
@@ -32,6 +33,16 @@ const event: UiEvent = {
   label: "coinbase trade",
   quality: "fresh"
 };
+
+describe("clampedVolumeShare", () => {
+  it("maps volume to a readable half-point layout share", () => {
+    expect(clampedVolumeShare(60, 40, 35, 65)).toBe(60);
+    expect(clampedVolumeShare(1, 99, 35, 65)).toBe(35);
+    expect(clampedVolumeShare(99, 1, 35, 65)).toBe(65);
+    expect(clampedVolumeShare(0, 0, 35, 65)).toBe(50);
+    expect(clampedVolumeShare(10, 23, 30, 70)).toBe(30.5);
+  });
+});
 
 describe("mergeUiEvent", () => {
   it("is idempotent when a REST snapshot races the same WebSocket event", () => {
@@ -125,9 +136,11 @@ describe("seededVisual", () => {
   });
 
   it("fades a bubble gradually across the five-minute window", () => {
-    expect(bubbleAgeOpacity(event, event.batchEndMs)).toBeCloseTo(0.82);
-    expect(bubbleAgeOpacity(event, event.batchEndMs + 150_000)).toBeCloseTo(0.6089, 3);
-    expect(bubbleAgeOpacity(event, event.batchEndMs + 300_000)).toBeCloseTo(0.18);
+    expect(bubbleAgeOpacity(event, event.batchEndMs)).toBeCloseTo(0.85);
+    expect(bubbleAgeOpacity(event, event.batchEndMs + 75_000)).toBeCloseTo(0.575);
+    expect(bubbleAgeOpacity(event, event.batchEndMs + 150_000)).toBeCloseTo(0.3);
+    expect(bubbleAgeOpacity(event, event.batchEndMs + 225_000)).toBeCloseTo(0.2);
+    expect(bubbleAgeOpacity(event, event.batchEndMs + 300_000)).toBeCloseTo(0.1);
   });
 });
 

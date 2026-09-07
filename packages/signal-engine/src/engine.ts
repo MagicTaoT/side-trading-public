@@ -21,6 +21,7 @@ Decimal.set({ precision: 40, rounding: Decimal.ROUND_HALF_EVEN });
 interface PriceSample {
   atMs: number;
   value: Decimal;
+  provider: string;
 }
 
 interface FlowSample {
@@ -38,12 +39,12 @@ interface TransportState {
 interface SegmentState {
   prices: PriceSample[];
   flows: FlowSample[];
-  transport: TransportState | null;
+  transports: Map<string, TransportState>;
   sourceProviders: Set<string>;
 }
 
 function emptySegmentState(): SegmentState {
-  return { prices: [], flows: [], transport: null, sourceProviders: new Set<string>() };
+  return { prices: [], flows: [], transports: new Map<string, TransportState>(), sourceProviders: new Set<string>() };
 }
 
 function segmentFor(event: MarketEvent): S0Segment {
@@ -185,28 +186,32 @@ export class S0SignalEngine {
     state.sourceProviders.add(event.source.provider);
 
     if (event.kind === "source-health") {
-      state.transport = {
+      state.transports.set(event.source.provider, {
         connection: event.payload.connection,
         quality: event.quality.state,
         lastSeenAtMs: this.#nowMs
-      };
+      });
       return;
     }
 
-    state.transport = {
+    state.transports.set(event.source.provider, {
       connection: "live",
       quality: event.quality.state,
       lastSeenAtMs: this.#nowMs
-    };
+    });
 
     if (event.kind === "bbo") {
       const mid = new Decimal(event.payload.bidPx).plus(event.payload.askPx).div(2);
-      state.prices.push({ atMs: this.#nowMs, value: mid });
+      state.prices.push({ atMs: this.#nowMs, value: mid, provider: event.source.provider });
     } else if (event.kind === "trade" && event.payload.aggressor !== "unknown") {
       const notionalQuote = new Decimal(event.payload.px).mul(event.payload.sizeSOL);
       state.flows.push({ atMs: this.#nowMs, side: event.payload.aggressor, notionalQuote });
     } else if (event.kind === "onchain-swap") {
-      state.prices.push({ atMs: this.#nowMs, value: new Decimal(event.payload.effectivePxQuotePerSol) });
+      state.prices.push({
+        atMs: this.#nowMs,
+        value: new Decimal(event.payload.effectivePxQuotePerSol),
+        provider: event.source.provider
+      });
       const stableAtomic = event.payload.side === "buy-sol" ? event.payload.amountInAtomic : event.payload.amountOutAtomic;
       state.flows.push({
         atMs: this.#nowMs,
@@ -229,12 +234,13 @@ export class S0SignalEngine {
     const state = this.#states.get(segment) as SegmentState;
     const minimumNotionalQuote = this.config.minimumNotionalQuote[segment];
     const sourceProviders = [...state.sourceProviders].sort();
-    const transport = state.transport;
-    const transportFresh =
-      transport !== null &&
-      transport.connection === "live" &&
-      transport.quality === "fresh" &&
-      this.#nowMs - transport.lastSeenAtMs <= this.config.freshnessMs;
+    const transports = [...state.transports.values()];
+    const transportFresh = transports.some(
+      (transport) =>
+        transport.connection === "live" &&
+        transport.quality === "fresh" &&
+        this.#nowMs - transport.lastSeenAtMs <= this.config.freshnessMs
+    );
 
     const features = {
       priceImpulse30s: this.#priceFeature(state),
@@ -243,11 +249,11 @@ export class S0SignalEngine {
 
     if (!transportFresh) {
       const reason =
-        transport === null
+        transports.length === 0
           ? "SOURCE_NOT_OBSERVED"
-          : transport.quality === "gap"
+          : transports.some(({ quality }) => quality === "gap")
             ? "SOURCE_GAP"
-            : transport.connection !== "live"
+            : transports.every(({ connection }) => connection !== "live")
               ? "SOURCE_DISCONNECTED"
               : "SOURCE_STALE";
       return {
@@ -306,21 +312,41 @@ export class S0SignalEngine {
   }
 
   #priceFeature(state: SegmentState): PriceImpulseFeature {
-    const latest = state.prices.at(-1);
-    if (!latest) return unavailablePriceFeature();
     const cutoff = this.#nowMs - this.config.windowMs;
-    const anchor = state.prices.filter(({ atMs }) => atMs <= cutoff).at(-1);
-    if (!anchor || latest.atMs <= anchor.atMs || anchor.value.lte(0)) {
-      return { ...unavailablePriceFeature(), latestAtMs: latest.atMs };
+    const byProvider = new Map<string, PriceSample[]>();
+    for (const sample of state.prices) {
+      const current = byProvider.get(sample.provider) ?? [];
+      current.push(sample);
+      byProvider.set(sample.provider, current);
     }
 
-    const valueBps = latest.value.div(anchor.value).minus(1).mul(10_000);
+    const available: Array<{ valueBps: Decimal; anchorAtMs: number; latestAtMs: number }> = [];
+    let latestObservedAtMs: number | null = null;
+    for (const samples of byProvider.values()) {
+      const latest = samples.at(-1);
+      if (!latest) continue;
+      latestObservedAtMs = Math.max(latestObservedAtMs ?? latest.atMs, latest.atMs);
+      const anchor = samples.filter(({ atMs }) => atMs <= cutoff).at(-1);
+      if (!anchor || latest.atMs <= anchor.atMs || anchor.value.lte(0)) continue;
+      available.push({
+        valueBps: latest.value.div(anchor.value).minus(1).mul(10_000),
+        anchorAtMs: anchor.atMs,
+        latestAtMs: latest.atMs
+      });
+    }
+    if (available.length === 0) {
+      return { ...unavailablePriceFeature(), latestAtMs: latestObservedAtMs };
+    }
+
+    const valueBps = available
+      .reduce((sum, sample) => sum.plus(sample.valueBps), new Decimal(0))
+      .div(available.length);
     return {
       status: "available",
       valueBps: fixed(valueBps, 8),
       direction: direction(valueBps, new Decimal(this.config.priceThresholdBps)),
-      anchorAtMs: anchor.atMs,
-      latestAtMs: latest.atMs
+      anchorAtMs: Math.min(...available.map(({ anchorAtMs }) => anchorAtMs)),
+      latestAtMs: Math.max(...available.map(({ latestAtMs }) => latestAtMs))
     };
   }
 

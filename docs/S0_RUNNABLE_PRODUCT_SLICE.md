@@ -168,6 +168,8 @@ pnpm smoke:s0
 
 ### SIDE-010 - Paper estimate broker
 
+状态：**COMPLETE · PAPER ONLY · VOLATILE RECORDS UNTIL SIDE-011**；验收记录见 [SIDE-010](SIDE-010_PAPER_ESTIMATE_BROKER.md)。
+
 依赖：SIDE-002、SIDE-003；LIVE record 依赖至少三个 fresh juries。
 
 交付：
@@ -180,6 +182,8 @@ pnpm smoke:s0
 - 只保存 sanitized estimate、route、request ids/times/hash；无 instruction body、signer、assembly、simulation 或 send client。
 
 退出条件：success/429/timeout/schema drift/expired/mixed-provider/automatic-fallback tests 通过；静态扫描确认没有 live execution path。
+
+实现说明：preview/order 当前只在有界进程内存中保留脱敏记录，并明确标记 `memory-side-010`；SIDE-011 负责 Postgres persistence、decision journal 与 markout。
 
 ### SIDE-011 - Decision journal and +5m markout
 

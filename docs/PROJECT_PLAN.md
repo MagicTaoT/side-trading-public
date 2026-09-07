@@ -2,8 +2,8 @@
 
 > 工作定义：**See what the market is actually saying - and where it disagrees.**
 
-状态：规划基线 v0.2；SIDE-001 至 SIDE-005 complete；SIDE-006 local required gates complete / target AWS gate blocked；R0 REPLAY RUNNABLE；S0 产品版本 in execution
-日期：2026-09-04
+状态：规划基线 v0.2；SIDE-001 至 SIDE-005、SIDE-010 complete；SIDE-006 local required gates complete / target AWS gate blocked；SIDE-007 至 SIDE-009 runtime adapters 已接入但 R1 完整退出门未完成；R0 REPLAY RUNNABLE；S0 产品版本 in execution
+日期：2026-09-06
 目标市场：SOL only
 核心决策周期：未来 5 分钟（MVP 唯一窗口）
 
@@ -155,7 +155,7 @@ S0 的“双向 $10k paper estimate”使用明确且可重放的 exact-in 口�
 
 ### 5.1 信息架构
 
-桌面首页改为由方向与市场类型共同定义的四象限；中央 verdict 浮在交叉点，顶部保留 SIDE、SOL/USD、5 MIN WINDOW、数据状态与 PAPER MODE：
+桌面首页改为由方向与市场类型共同定义的四象限；full-width verdict bar 位于 SPOT 与 PERP 两行之间，BUY/SELL 操作分居左右并与 power 方向对齐，结论、解释和 WAIT 居中；顶部保留 SIDE、SOL/USD、5 MIN WINDOW、数据状态与 PAPER MODE：
 
 ```text
 ┌────────────────────────────────────────────────────────────────────┐
@@ -175,7 +175,7 @@ S0 的“双向 $10k paper estimate”使用明确且可重放的 exact-in 口�
 
 视觉基调：graphite 黑、暖白文字、低饱和结构线；绿色只表示 buy/up，红色只表示 sell/down，青色表示 neutral/live，琥珀色表示 warning/stale。不同 venue 不用彩虹配色，避免认知负担。
 
-四个区域不是固定等分，而是一个 **weighted matrix**：上下 Spot/Perp 各占 50%，保持稳定的纵向阅读地图；左右 BUY/SELL 分界线则由 rolling 5m normalized strength share 决定。中央 verdict 始终锁在整个 viewport 的几何中心，不跟随分界线移动。布局比例使用 2 秒 EMA、每秒最多移动 2 个百分点，并 clamp 在 35%-65%，避免单笔大额成交让界面跳动或把某区挤到不可读。S0 的 strength 先计算每个 source 内部的 buy share，再按 versioned reliability weight 合并，不能直接把 USDC、USDT 与 USD notional 假设为同一数值相加。分界线只是描述性 flow balance，不等同于 directional verdict；verdict 仍由四个 jury 与数据健康门决定。
+四个区域不是固定等分，而是一个 **weighted matrix**：上下 Spot/Perp 各占 50%，保持稳定的纵向阅读地图；左右 BUY/SELL 分界线则由 rolling 5m normalized strength share 决定。verdict 使用两行之间的独立全宽条带，不跟随分界线移动，也不遮挡 bubble。布局比例使用 2 秒 EMA、每秒最多移动 2 个百分点，并 clamp 在 35%-65%，避免单笔大额成交让界面跳动或把某区挤到不可读。S0 的 strength 先计算每个 source 内部的 buy share，再按 versioned reliability weight 合并，不能直接把 USDC、USDT 与 USD notional 假设为同一数值相加。分界线只是描述性 flow balance，不等同于 directional verdict；verdict 仍由四个 jury 与数据健康门决定。
 
 #### Bubble field 语义
 
@@ -186,7 +186,7 @@ S0 的“双向 $10k paper estimate”使用明确且可重放的 exact-in 口�
 - bubble 到达时从所属 subpanel 边缘进入并轻微 settle；随事件年龄降低 opacity；恰好在 rolling five-minute window 之外移除。颜色、位置或漂移动画不能改变 side/venue 的语义。
 - 每个 subpanel 固定显示 accepted event count、5m total volume、在所属象限的 volume share 与 freshness；最大 bubble 可显示 venue，其他 bubble 通过 hover/focus 读取 source、time、side 与 volume。
 - `bbo`、`book_delta`、`dex_quote`、funding 与 OI 只更新 summary、context 和 verdict，不产生 trade bubble。否则会让报价或状态变化伪装成真实成交。
-- 中央 verdict 使用 exclusion zone，bubble 在各自 Canvas clip region 内运动，不能穿过象限边界或遮挡 verdict 文本。
+- verdict 使用独立 in-flow strip；bubble 在各自 Canvas clip region 内运动，不能穿过象限边界。
 
 ### 5.2 Live event 视觉语法
 

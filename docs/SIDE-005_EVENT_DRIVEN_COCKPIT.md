@@ -8,17 +8,18 @@
 
 - 固定 `SOL / USD · 5 MIN DECISION WINDOW` cockpit；
 - CEX spot、CEX perp、DEX spot、DeFi perp 四个稳定 jury zones；
-- viewport-centered central verdict；1024 px 以下自动改为 verdict-first 非覆盖布局；
+- SPOT / PERP 两行之间约 82px 高的 compact full-width verdict bar；BUY/SELL 操作分居左右并对应 power 方向，结论、解释与 WAIT 居中，不覆盖 bubble field；
 - mode、原子 CEX profile shape、jury coverage、source freshness、model version、last valid verdict；
 - 75 ms visual micro-batch，保留 source、instrument、kind、`×N`、buy/sell count、双边 notional、最大 notional与价格范围；
 - trade/onchain-swap 才生成经济成交 bubble；BBO 只产生 quote pulse，不伪装成成交；
 - event-id seeded bubble geometry、手动 pause、hidden-page snapshot recovery、`prefers-reduced-motion`；
+- weighted matrix：Spot/Perp 行高固定，行内 BUY/SELL 随 5m volume 在 35%–65% 间变化，source subpanel 在 30%–70% 间变化；
 - BUY / SELL / WAIT paper drawer 外壳，消费 server 提供的明确 `REPLAY` preview contract；
 - R0 页面内明确显示 `REPLAY`、`PAPER MODE` 与 `LIMITED S0 COVERAGE`。
 
 ## 2. 十秒可读信息
 
-中央卡始终直接回答四个问题：
+中间 verdict bar 始终直接回答四个问题：
 
 1. 当前 verdict 是 BUY BIAS、SELL BIAS、NO EDGE 还是 INSUFFICIENT DATA；
 2. juries 是否达到 3/4 一致，或 coverage 尚未 ready；
@@ -35,7 +36,9 @@
 - `minPx`、`maxPx`；
 - 已存在的 count、buy/sell count、buy/sell/max notional 由 runtime 填充。
 
-event rail 按 `zone + source + venue + instrument + quote + kind` 做 75 ms 分桶。不同 venue 不合并；混合方向保留 buy/sell 两侧数据并显示为 flat，而不是只保留净方向。成交 bubble 另按 side-specific lane 分桶，以首个 canonical event id 作为稳定视觉身份：入场动画只播放一次，随后按年龄渐隐，并驻留到 rolling 5m 到期。高频非成交 state event 继续受每 zone 50-event hard bound 约束。
+event rail 按 `zone + source + venue + instrument + quote + kind` 做 75 ms 分桶。不同 venue 不合并；混合方向保留 buy/sell 两侧数据并显示为 flat，而不是只保留净方向。成交 bubble 另按 side-specific lane 分桶，以首个 canonical event id 作为稳定视觉身份：首次入场播放一次 0.8 秒、继承 BUY/SELL 颜色的外扩高光圈；opacity 在前 2.5 分钟由 85% 降至 30%，随后在 5 分钟边界前降至 10%，到期移除。高频非成交 state event 继续受每 zone 50-event hard bound 约束。
+
+布局采用分层 volume 权重：Spot/Perp 保持等高以便比较；每行 BUY/SELL 按该 market 的 5m realized volume 分配宽度并 clamp 到 35%–65%；每个象限内的两个 source panel 再按各自 volume 分配宽度并 clamp 到 30%–70%。比例量化到 0.5 percentage point，并使用平滑 CSS transition，避免逐笔微小变化造成视觉抖动。verdict bar 位于 SPOT 与 PERP 行之间的正常文档流中，始终全宽且不随分界线移动。
 
 ## 4. Paper drawer 真值边界
 
@@ -56,7 +59,7 @@ Bitquery realized swap 与 0x-shaped preview contract 分开呈现，前者不�
 - [x] `pnpm smoke:s0`：HTTP + WebSocket + replay pipeline passed；
 - [x] micro-batch 同桶合并、跨 venue/超窗不合并、双边字段不被 net away；
 - [x] seeded visual geometry byte-for-byte deterministic 且有界；
-- [x] 360 / 736 为单列、1024 为 verdict-first grid、1440 为 centered exclusion-zone layout 的 breakpoint contract；
+- [x] 360 / 736 为单列、1024 为双行 verdict strip、1440 为三列 verdict strip 的 breakpoint contract；
 - [x] 浏览器完成 replay、BUY/SELL/WAIT drawer、motion pause 交互；
 - [x] 浏览器显示 `2/4 · CEX SPOT leading · INSUFFICIENT DATA`；
 - [x] 浏览器控制台无 warning/error。

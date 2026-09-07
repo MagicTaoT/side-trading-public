@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parseMarketEvent } from "@side/market-core";
 import { S0SignalEngine } from "../src/index.js";
 import { goldenScenarios, sourceHealthEvent, staleScenario } from "./fixtures/golden-scenarios.js";
 
@@ -6,6 +7,39 @@ function run(events: readonly Parameters<S0SignalEngine["ingest"]>[0][]) {
   const engine = new S0SignalEngine();
   const transitions = events.flatMap((event) => engine.ingest(event));
   return { snapshot: engine.snapshot(), transitions };
+}
+
+function perpBbo(
+  provider: "coinbase-derivatives" | "kraken-futures",
+  atMs: number,
+  ingestSeq: string,
+  mid: number
+) {
+  return parseMarketEvent({
+    schemaVersion: 1,
+    eventId: `${provider}:bbo:${ingestSeq}`,
+    ingestSeq,
+    source: { provider, channel: "book", connectionGeneration: 1 },
+    venue: provider,
+    segment: "perp",
+    instrumentId: provider === "kraken-futures" ? "PF_SOLUSD" : "SLP",
+    base: "SOL",
+    quote: "USD",
+    occurredAtMs: atMs,
+    timeOrigin: "venue",
+    receivedAtUnixMs: atMs,
+    receivedMonoNs: String(BigInt(atMs) * 1_000_000n),
+    quality: { state: "fresh", latencyMs: 0, outOfOrder: false, replay: false },
+    kind: "bbo",
+    payload: {
+      bidPx: String(mid - 0.01),
+      bidSizeNative: "10",
+      bidSizeSOL: "10",
+      askPx: String(mid + 0.01),
+      askSizeNative: "10",
+      askSizeSOL: "10"
+    }
+  });
 }
 
 describe("s0-v1 golden scenarios", () => {
@@ -57,6 +91,23 @@ describe("s0-v1 golden scenarios", () => {
 });
 
 describe("missing feature and health behavior", () => {
+  it("computes multi-venue price impulse within each provider before combining", () => {
+    const atMs = 1_750_000_000_000;
+    const { snapshot } = run([
+      perpBbo("kraken-futures", atMs, "1", 110),
+      perpBbo("coinbase-derivatives", atMs, "2", 100),
+      perpBbo("coinbase-derivatives", atMs + 30_000, "3", 100),
+      perpBbo("kraken-futures", atMs + 30_000, "4", 110)
+    ]);
+    const perp = snapshot.juries.find(({ segment }) => segment === "cex-perp");
+    expect(perp?.sourceProviders).toEqual(["coinbase-derivatives", "kraken-futures"]);
+    expect(perp?.features.priceImpulse30s).toMatchObject({
+      status: "available",
+      valueBps: "0.00000000",
+      direction: "NEUTRAL"
+    });
+  });
+
   it("does not zero-fill missing flow", () => {
     const withoutTrades = goldenScenarios["spot-led"].filter(
       (event) => !(event.segment === "spot" && event.kind === "trade")

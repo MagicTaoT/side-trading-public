@@ -33,6 +33,7 @@ function compareNonNegativeDecimals(left: string, right: string): number {
 export const sourceProviderSchema = z.enum([
   "coinbase",
   "coinbase-derivatives",
+  "kraken-futures",
   "binance",
   "kucoin",
   "okx",
@@ -47,6 +48,7 @@ export const sourceProviderSchema = z.enum([
 export const venueSchema = z.enum([
   "coinbase",
   "coinbase-derivatives",
+  "kraken-futures",
   "binance",
   "kucoin",
   "okx",

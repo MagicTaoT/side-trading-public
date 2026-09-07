@@ -88,4 +88,43 @@ describe("S0 runtime HTTP surface", () => {
       )
     ).toBe(true);
   });
+
+  it("previews and records a replay paper order through idempotent HTTP routes", async () => {
+    const app = await createApp({ replayJsonl });
+    apps.push(app);
+    await app.inject({ method: "POST", url: "/api/replay/start" });
+
+    const previewResponse = await app.inject({
+      method: "POST",
+      url: "/api/paper-orders/preview",
+      headers: { "idempotency-key": "http-preview-001" },
+      payload: { side: "SELL", provider: "zeroex" }
+    });
+    expect(previewResponse.statusCode).toBe(200);
+    const preview = previewResponse.json().preview;
+    expect(preview).toMatchObject({
+      mode: "REPLAY",
+      status: "READY",
+      side: "SELL",
+      provider: "zeroex",
+      inputAmountSOL: "56.710000000",
+      estimatedOutputUSDC: "9950.000000"
+    });
+
+    const orderResponse = await app.inject({
+      method: "POST",
+      url: "/api/paper-orders",
+      payload: {
+        action: "SELL",
+        provider: "zeroex",
+        previewId: preview.previewId,
+        idempotencyKey: "http-record-0001"
+      }
+    });
+    expect(orderResponse.statusCode).toBe(201);
+    const order = orderResponse.json().order;
+    expect(order).toMatchObject({ executionMode: "paper", action: "SELL", previewId: preview.previewId });
+    expect((await app.inject({ method: "GET", url: `/api/paper-orders/${encodeURIComponent(order.orderId)}` })).json().order)
+      .toEqual(order);
+  });
 });

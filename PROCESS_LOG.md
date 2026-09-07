@@ -34,3 +34,15 @@
 - source heartbeat 不生成行情粒子；UI 改为每个市场独立保留 50 条事件，避免 DEX 高频流挤出其他 jury。
 - 本地 soak 中四个 provider 均为 fresh/live/non-replay，sequence 持续增长；类型检查与 52 个 workspace tests 通过。
 - 未扩大交易权限：LIVE paper quote 仍 unavailable；没有 signer、send 或自动 Jupiter fallback。目标 AWS gate 和 Bitquery historical backfill/checkpoint 仍未完成。
+
+## 2026-09-06 · SIDE-010
+
+- 目标：完成固定 SOL-USDC / $10k 的 action-time paper estimate、显式 fallback 和 record policy，不加入任何 live execution path。
+- 实现：新增 0x provider、Jupiter quote-only provider 与 replay provider；BUY 单次 exact-in，SELL 使用同 provider USDC→SOL anchor 后再 SOL→USDC；2 秒 TTL、failure id、provider health recheck 和 preview/order idempotency 由服务端强制。
+- UI：Paper Drawer 打开时请求新 estimate，显示 quote age、anchor amount、minimum output、reference price、route/request id；0x 失败后才显示 `TRY JUPITER ESTIMATE`。
+- 安全：0x instruction body 与 lookup tables 不保存、不返回；只保留脱敏 amount/route/zid/time/hash。无 wallet、signer、assembly、simulation 或 send client。
+- 失败纠正：Jupiter v1 quote 已被官方标记为 legacy；冻结 S0 仍使用已 preflight 的 quote-only contract，且完全不调用 transaction endpoint。后续迁移必须重新冻结 contract，不能在 SIDE-010 内静默切换。
+- 测试：新增 provider、broker 与 HTTP integration tests，覆盖 success、429、timeout、schema drift、expired、SELL 任一必要 quote leg 过期、mixed-provider、market gate、idempotency 与禁止自动 fallback；最终 78 个 workspace tests 及 production build 通过。
+- 真实验收：LIVE 浏览器从 0x 取得新鲜 $10k USDC→SOL estimate，并在 2 秒 TTL 内成功写入 `memory-side-010` paper record；返回与 UI 均未出现 instruction body 或 secret。
+- 边界：paper record 明确为 `memory-side-010`；Postgres、重启恢复、decision journal 和 +5m markout 留给 SIDE-011。
+- Focus time：未启用可靠计时，保持 `not measured`。

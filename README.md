@@ -14,6 +14,7 @@ SIDE 面向主动 SOL 交易者，汇总中心化交易所和 DeFi 的现货、�
 - [SIDE-004 Deterministic jury 与 verdict engine](docs/SIDE-004_SIGNAL_ENGINE.md)
 - [SIDE-005 Event-driven cockpit 与 R0 验收](docs/SIDE-005_EVENT_DRIVEN_COCKPIT.md)
 - [SIDE-006 Source preflight 与原子 profile selector](docs/SIDE-006_SOURCE_PREFLIGHT.md)
+- [SIDE-010 Paper estimate broker](docs/SIDE-010_PAPER_ESTIMATE_BROKER.md)
 - [更新后的 S0 可运行 Product Slice](docs/S0_RUNNABLE_PRODUCT_SLICE.md)
 - [Process log](PROCESS_LOG.md)
 - [主 Cockpit 视觉方向](ui-concepts/side-cockpit-v3.png)
@@ -23,7 +24,7 @@ SIDE 面向主动 SOL 交易者，汇总中心化交易所和 DeFi 的现货、�
 ## 当前建议
 
 - 市场判断与模拟验证版：真实公开行情 + 本地 paper execution；不使用真实资金，不签名，不广播，不上链。
-- S0 CEX：优先 Coinbase `SOL-USD` + Coinbase Derivatives `SLP` 原子 profile；任一不通过目标美国 AWS region preflight 时，整组回退 Binance spot/perp。
+- S0 CEX：Coinbase `SOL-USD` spot；CEX perp 同时接 Coinbase Derivatives `SLP` 与 Kraken Futures `PF_SOLUSD`。Binance spot/perp 保留为经过部署区域 preflight 后才启用的候选源。
 - S0 DEX flow：Bitquery WSOL/USDC decoded realized swaps；明确展示 coverage，不声称 Solana 全市场。
 - 0x Solana：paper 下单时获取一次可执行报价/指令作为成交参考，但不提交交易。
 - Jupiter：仅在 0x 失败且用户明确选择后作为 paper estimate fallback，不作 S0 连续行情或 DEX 成交流。
@@ -42,7 +43,7 @@ pnpm dev:s0
 pnpm smoke:s0
 ```
 
-本地真实行情模式由项目根目录的 `.env.live.local` 控制（格式见 [`.env.live.example`](.env.live.example)）。凭据继续只放在 `.env.preflight.local`。当前工作区已启用 `S0_RUNTIME_MODE=LIVE`，运行 `pnpm dev:s0` 后打开 `http://127.0.0.1:5173`，服务器会动态发现当前 Coinbase SLP 合约，并持久连接 Coinbase、Hyperliquid 与 Bitquery；不会自动载入 replay fixture。
+本地真实行情模式由项目根目录的 `.env.live.local` 控制（格式见 [`.env.live.example`](.env.live.example)）。凭据继续只放在 `.env.preflight.local`。当前工作区已启用 `S0_RUNTIME_MODE=LIVE`，运行 `pnpm dev:s0` 后打开 `http://127.0.0.1:5173`，服务器会动态发现当前 Coinbase SLP 合约，并持久连接 Coinbase、Kraken Futures、Hyperliquid 与 Bitquery；不会自动载入 replay fixture。Kraken 使用无需凭据的公开 `PF_SOLUSD` trade/book/ticker feeds。
 
 Source preflight：
 
@@ -53,4 +54,4 @@ pnpm preflight:s0 -- --region us-east-1 --samples 5 --out-dir reports/preflight/
 
 本地凭据的固定位置是 [`.env.preflight.local`](.env.preflight.local)，格式参考 [`.env.preflight.example`](.env.preflight.example)。CLI 会自动读取该文件；它已被 Git 忽略并设置为仅当前用户可读写。也可用 `--env-file <path>` 显式指定其他位置。必填凭据为 `BITQUERY_TOKEN`、`ZEROEX_API_KEY`；只有显式验证 Jupiter fallback 时才同时提供 `JUPITER_API_KEY` 和 `--include-jupiter`。secret 值不会进入报告。
 
-当前已完成 SIDE-002 foundation、SIDE-003 runtime spine、SIDE-004 deterministic signal engine 与 SIDE-005 event-driven cockpit。SIDE-006 的[本机 required strict 报告](reports/preflight/local-required-pass-2026-09-05/source-preflight.md) 已以退出码 0 选择 Coinbase，并连续验证 Hyperliquid、Bitquery 与 0x；显式 Jupiter 检查因当前 key 返回 401 而单独失败。产品 runtime 现已接入本地真实 Coinbase spot/SLP、Hyperliquid 与 Bitquery WebSocket，页面明确显示 `LIVE`，心跳不生成成交粒子，Bitquery 同签名 route legs 合并为单一净经济成交。目标 AWS SSH 入口仍超时，所以 SIDE-006 的目标部署 gate 继续 blocked；Bitquery historical backfill/checkpoint 也仍是 R1 完整退出门。Execution API 尚未接入 runtime，0x/Jupiter 仍保持独立的 action-time paper estimate 边界。
+当前已完成 SIDE-002 foundation、SIDE-003 runtime spine、SIDE-004 deterministic signal engine、SIDE-005 event-driven cockpit 与 SIDE-010 paper estimate broker。SIDE-006 的[本机 required strict 报告](reports/preflight/local-required-pass-2026-09-05/source-preflight.md) 已以退出码 0 选择 Coinbase，并连续验证 Hyperliquid、Bitquery 与 0x；显式 Jupiter 检查因当前 key 返回 401 而单独失败。产品 runtime 现已接入本地真实 Coinbase spot/SLP、Kraken Futures `PF_SOLUSD`、Hyperliquid 与 Bitquery WebSocket，页面明确显示 `LIVE`，心跳不生成成交粒子，Bitquery 同签名 route legs 合并为单一净经济成交。目标 AWS SSH 入口仍超时，所以 SIDE-006 的目标部署 gate 继续 blocked；Bitquery historical backfill/checkpoint 也仍是 R1 完整退出门。Paper drawer 现会在用户打开时请求真实 0x estimate，SELL 使用同 provider anchor，Jupiter 只允许用户携带 0x failure id 显式触发；记录仍是 SIDE-010 的有界进程内存，Postgres 与 +5m markout 进入 SIDE-011。

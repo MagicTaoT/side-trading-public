@@ -9,6 +9,21 @@ export const VISUAL_BATCH_MS = 75;
 export const UI_EVENT_WINDOW_MS = 300_000;
 const RECENT_STATE_EVENT_LIMIT_PER_ZONE = 50;
 
+export function clampedVolumeShare(
+  primaryVolume: number,
+  secondaryVolume: number,
+  minimumPercent: number,
+  maximumPercent: number
+): number {
+  if (!Number.isFinite(primaryVolume) || !Number.isFinite(secondaryVolume)) return 50;
+  const primary = Math.max(0, primaryVolume);
+  const secondary = Math.max(0, secondaryVolume);
+  const total = primary + secondary;
+  if (total === 0) return 50;
+  const clamped = Math.min(maximumPercent, Math.max(minimumPercent, primary / total * 100));
+  return Math.round(clamped * 2) / 2;
+}
+
 const BATCHABLE_KINDS = new Set<UiEvent["kind"]>([
   "trade",
   "bbo",
@@ -184,7 +199,8 @@ export function bubbleAgeOpacity(
   windowMs = UI_EVENT_WINDOW_MS
 ): number {
   const ageRatio = Math.min(1, Math.max(0, (evaluatedAtMs - event.batchEndMs) / windowMs));
-  return 0.82 - Math.pow(ageRatio, 1.6) * 0.64;
+  if (ageRatio <= 0.5) return 0.85 - ageRatio / 0.5 * 0.55;
+  return 0.3 - (ageRatio - 0.5) / 0.5 * 0.2;
 }
 
 export function seededVisual(event: UiEvent): SeededVisual {

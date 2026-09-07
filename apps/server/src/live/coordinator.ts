@@ -1,6 +1,7 @@
 import { BitqueryLiveAdapter } from "./bitquery.js";
 import { CoinbaseLiveAdapter, coinbaseInstruments } from "./coinbase.js";
 import { HyperliquidLiveAdapter } from "./hyperliquid.js";
+import { KrakenFuturesLiveAdapter } from "./kraken-futures.js";
 import type { LiveEventSink } from "./common.js";
 
 interface Adapter { start(): void; stop(): void; }
@@ -17,6 +18,7 @@ export class LiveCoordinator {
   constructor(options: LiveCoordinatorOptions) {
     this.#adapters = [
       new CoinbaseLiveAdapter(options.sink, coinbaseInstruments(options.coinbasePerpProductId)),
+      new KrakenFuturesLiveAdapter(options.sink),
       new HyperliquidLiveAdapter(options.sink),
       new BitqueryLiveAdapter(options.sink, options.bitqueryToken)
     ];

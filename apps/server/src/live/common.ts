@@ -7,8 +7,8 @@ export interface LiveEventSink {
 }
 
 export interface LiveSourceSpec {
-  provider: "coinbase" | "coinbase-derivatives" | "hyperliquid" | "bitquery";
-  venue: "coinbase" | "coinbase-derivatives" | "hyperliquid" | "solana-dex";
+  provider: "coinbase" | "coinbase-derivatives" | "kraken-futures" | "hyperliquid" | "bitquery";
+  venue: "coinbase" | "coinbase-derivatives" | "kraken-futures" | "hyperliquid" | "solana-dex";
   segment: "spot" | "perp" | "dex-spot";
   instrumentId: string;
   quote: "USD" | "USDC";

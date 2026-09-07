@@ -15,6 +15,8 @@ const host = process.env.HOST ?? "127.0.0.1";
 const replayJsonl = await loadDefaultReplayFixture();
 const mode = process.env.S0_RUNTIME_MODE === "LIVE" ? "LIVE" : "REPLAY";
 const bitqueryToken = process.env.BITQUERY_TOKEN;
+const zeroexApiKey = process.env.ZEROEX_API_KEY;
+const jupiterApiKey = process.env.JUPITER_API_KEY;
 const coinbasePerpProductId = mode === "LIVE"
   ? process.env.S0_COINBASE_PERP_PRODUCT ?? await discoverCoinbaseSlpProduct()
   : undefined;
@@ -26,6 +28,14 @@ const app = await createApp({
   cexProfile: mode === "LIVE" ? "coinbase" : "coinbase",
   ...(mode === "LIVE" && bitqueryToken && coinbasePerpProductId
     ? { live: { bitqueryToken, coinbasePerpProductId } }
+    : {}),
+  ...(zeroexApiKey || jupiterApiKey
+    ? {
+        paper: {
+          ...(zeroexApiKey ? { zeroexApiKey } : {}),
+          ...(jupiterApiKey ? { jupiterApiKey } : {})
+        }
+      }
     : {})
 });
 

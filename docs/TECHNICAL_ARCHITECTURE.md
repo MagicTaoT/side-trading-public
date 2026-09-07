@@ -758,7 +758,7 @@ paper_markout       +5m 结果
 1. React DOM：数值、标签、可访问性、paper drawer；
 2. 单一 Canvas/SVG overlay：pulse、particle、source → verdict tracer。
 
-Bubble matrix 的中央 verdict 使用 viewport-centered overlay，位置与大小不受 flow 改变。Spot/Perp 行固定 50/50；BUY/SELL 列宽使用 rolling 5m `layoutBuyShare`，并 clamp 在 35%-65%。S0 不跨 numeraire 直接累加 volume，而是先算每个 source 的 `buyNotional / (buyNotional + sellNotional)`，再按 versioned reliability weight 合并；布局做 2 秒 EMA 且每秒最多移动 2 个百分点。布局变化只描述 flow balance，不触发 jury/verdict。每个 subpanel 使用独立 Canvas clip region 和 central exclusion zone；reflow 不能让 bubble 跨区或遮挡 verdict。
+Bubble matrix 的 verdict 使用 SPOT / PERP 两行之间的 full-width in-flow strip，位置与大小不受 flow 改变，也不覆盖 bubble field。Spot/Perp 行固定 50/50；BUY/SELL 列宽使用 rolling 5m `layoutBuyShare`，并 clamp 在 35%-65%。S0 不跨 numeraire 直接累加 volume，而是先算每个 source 的 `buyNotional / (buyNotional + sellNotional)`，再按 versioned reliability weight 合并；布局做 2 秒 EMA 且每秒最多移动 2 个百分点。布局变化只描述 flow balance，不触发 jury/verdict。每个 subpanel 使用独立 Canvas clip region；reflow 不能让 bubble 跨区。
 
 禁止每个事件创建永久 DOM 节点。动画完成后立刻回收。用户要求的“每个 event 有反馈”精确定义为：每个通过 schema、dedupe、ordering gate 的 canonical economic event，都必须被逐条或在显式标注的 micro-batch 中记账；heartbeat、重复、无效 packet 进入 health counters，不制造虚假行情粒子。
 

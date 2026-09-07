@@ -4,6 +4,7 @@ import type { JurySnapshot, S0Segment, SignalSnapshot, Verdict } from "@side/sig
 import {
   bubbleAgeOpacity,
   bubbleVisualKey,
+  clampedVolumeShare,
   mergeUiEvent,
   microBatchBubbleEvents,
   microBatchUiEvents,
@@ -23,7 +24,7 @@ interface SourceState {
   lastSeenAtMs: number;
 }
 
-interface PaperPreview {
+interface LegacyPaperPreview {
   schemaVersion: 1;
   previewId: string;
   mode: "LIVE" | "REPLAY";
@@ -40,6 +41,60 @@ interface PaperPreview {
   routeSummary: string[];
   recordable: false;
   disabledReason: "PAPER_RECORD_ENTERS_SIDE_010" | "LIVE_QUOTE_NOT_REQUESTED";
+}
+
+type PaperProvider = "zeroex" | "jupiter";
+
+interface PaperQuoteFailure {
+  failureId: string;
+  provider: PaperProvider;
+  code: string;
+  occurredAtMs: number;
+  retriable: boolean;
+  httpStatus: number | null;
+}
+
+interface PaperQuoteLeg {
+  provider: PaperProvider;
+  requestId: string;
+  receivedAtMs: number;
+  latencyMs: number;
+  rawResponseHash: string;
+  routeSummary: string[];
+}
+
+interface PaperApiPreview {
+  schemaVersion: 1;
+  previewId: string;
+  mode: "LIVE" | "REPLAY";
+  status: "READY" | "UNAVAILABLE";
+  provider: PaperProvider;
+  side: "BUY" | "SELL";
+  pair: "SOL-USDC";
+  targetNotionalQuote: "10000";
+  createdAtMs: number;
+  expiresAtMs: number | null;
+  quoteAgeMs: number | null;
+  recordable: boolean;
+  primaryFailureId: string | null;
+  failure: PaperQuoteFailure | null;
+  anchor: PaperQuoteLeg | null;
+  directional: PaperQuoteLeg | null;
+  inputAmountSOL: string | null;
+  estimatedOutputSOL: string | null;
+  estimatedOutputUSDC: string | null;
+  minimumOutputAmount: string | null;
+  referencePxQuotePerSol: string | null;
+  routeSummary: string[];
+  feeBreakdown: null;
+}
+
+interface PaperApiOrder {
+  orderId: string;
+  action: PaperAction;
+  executionMode: "paper";
+  persistence: "memory-side-010";
+  recordedAtMs: number;
 }
 
 interface SegmentFlowSnapshot {
@@ -67,7 +122,7 @@ interface RuntimeSnapshot {
   recentUiEvents: UiEvent[];
   flow5m: FlowWindowSnapshot;
   signal: SignalSnapshot;
-  paperPreview: PaperPreview;
+  paperPreview: LegacyPaperPreview;
 }
 
 type GatewayMessage =
@@ -80,7 +135,7 @@ type GatewayMessage =
 
 type PaperAction = "BUY" | "SELL" | "WAIT";
 
-const emptyPaperPreview: PaperPreview = {
+const emptyPaperPreview: LegacyPaperPreview = {
   schemaVersion: 1,
   previewId: "replay:zeroex:buy-sol:side-005",
   mode: "REPLAY",
@@ -343,6 +398,12 @@ function PowerQuadrant({ market, side, flow5m, juries, events, sources }: PowerQ
   const segments = powerSegments[market];
   const flows = segments.map((segment) => flow5m.segments.find((candidate) => candidate.segment === segment));
   const totalNotional = flows.reduce((sum, flow) => sum + sideFlow(flow, side).notional, 0);
+  const firstCellNotional = sideFlow(flows[0], side).notional;
+  const firstCellShare = clampedVolumeShare(firstCellNotional, totalNotional - firstCellNotional, 30, 70);
+  const cellGridStyle = {
+    "--first-cell-share": `${firstCellShare}%`,
+    "--second-cell-share": `${100 - firstCellShare}%`
+  } as CSSProperties;
 
   return (
     <article className={`power-quadrant ${market}-${side} ${side}`} aria-label={`${market} ${side} power`}>
@@ -350,7 +411,7 @@ function PowerQuadrant({ market, side, flow5m, juries, events, sources }: PowerQ
         <h2>{market.toUpperCase()} · {side.toUpperCase()} POWER</h2>
         <span>5M {side.toUpperCase()} VOLUME <strong>{totalNotional > 0 ? money(totalNotional) : "—"}</strong></span>
       </div>
-      <div className="power-cell-grid">
+      <div className="power-cell-grid" style={cellGridStyle}>
         {segments.map((segment) => (
           <PowerCell
             key={`${segment}:${side}`}
@@ -370,37 +431,166 @@ function PowerQuadrant({ market, side, flow5m, juries, events, sources }: PowerQ
   );
 }
 
-interface PaperDrawerProps { action: PaperAction; preview: PaperPreview; onClose: () => void; }
+interface PowerRowProps {
+  market: PowerMarket;
+  flow5m: FlowWindowSnapshot;
+  juries: JurySnapshot[];
+  events: UiEvent[];
+  sources: SourceState[];
+}
 
-function PaperDrawer({ action, preview, onClose }: PaperDrawerProps) {
-  const hasPreview = action === "BUY";
+function PowerRow({ market, flow5m, juries, events, sources }: PowerRowProps) {
+  const marketSegments = new Set(powerSegments[market]);
+  const marketFlows = flow5m.segments.filter(({ segment }) => marketSegments.has(segment));
+  const buyNotional = marketFlows.reduce((total, flow) => total + Number(flow.buyNotionalQuote), 0);
+  const sellNotional = marketFlows.reduce((total, flow) => total + Number(flow.sellNotionalQuote), 0);
+  const buyShare = clampedVolumeShare(buyNotional, sellNotional, 35, 65);
+  const rowStyle = {
+    "--buy-quadrant-share": `${buyShare}%`,
+    "--sell-quadrant-share": `${100 - buyShare}%`
+  } as CSSProperties;
+
+  return (
+    <div className={`power-row ${market}`} style={rowStyle}>
+      <PowerQuadrant market={market} side="buy" flow5m={flow5m} juries={juries} events={events} sources={sources} />
+      <PowerQuadrant market={market} side="sell" flow5m={flow5m} juries={juries} events={events} sources={sources} />
+    </div>
+  );
+}
+
+function requestKey(): string {
+  return crypto.randomUUID();
+}
+
+async function responseBody<T>(response: Response, field: string): Promise<T> {
+  const body = await response.json() as Record<string, unknown>;
+  if (!response.ok) {
+    const error = typeof body.error === "object" && body.error !== null ? body.error as Record<string, unknown> : null;
+    throw new Error(typeof error?.code === "string" ? error.code : `HTTP_${response.status}`);
+  }
+  return body[field] as T;
+}
+
+interface PaperDrawerProps { action: PaperAction; mode: "LIVE" | "REPLAY"; freshJuryCount: number; onClose: () => void; }
+
+function PaperDrawer({ action, mode, freshJuryCount, onClose }: PaperDrawerProps) {
+  const [preview, setPreview] = useState<PaperApiPreview | null>(null);
+  const [pending, setPending] = useState(action !== "WAIT");
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const [order, setOrder] = useState<PaperApiOrder | null>(null);
+  const [recordPending, setRecordPending] = useState(false);
+  const [clockMs, setClockMs] = useState(Date.now());
+  const [initialPreviewKey] = useState(requestKey);
+  const [recordKey, setRecordKey] = useState(requestKey);
+
+  const loadPreview = useCallback(async (
+    provider: PaperProvider,
+    primaryFailureId: string | null,
+    idempotencyKey = requestKey()
+  ) => {
+    setPending(true);
+    setRequestError(null);
+    setOrder(null);
+    setRecordKey(requestKey());
+    try {
+      const response = await fetch("/api/paper-orders/preview", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+        body: JSON.stringify({ side: action, provider, primaryFailureId })
+      });
+      setPreview(await responseBody<PaperApiPreview>(response, "preview"));
+      setClockMs(Date.now());
+    } catch (reason) {
+      setRequestError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setPending(false);
+    }
+  }, [action]);
+
+  useEffect(() => {
+    if (action === "WAIT") return;
+    void loadPreview("zeroex", null, initialPreviewKey);
+  }, [action, initialPreviewKey, loadPreview]);
+
+  useEffect(() => {
+    if (preview?.status !== "READY") return;
+    const timer = window.setInterval(() => setClockMs(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, [preview?.status]);
+
+  const quoteAgeMs = preview?.directional
+    ? Math.max(0, clockMs - Math.min(preview.directional.receivedAtMs, preview.anchor?.receivedAtMs ?? preview.directional.receivedAtMs))
+    : null;
+  const quoteFresh = preview?.status === "READY" && preview.expiresAtMs !== null && clockMs <= preview.expiresAtMs;
+  const canFallback = preview?.status === "UNAVAILABLE" && preview.provider === "zeroex" &&
+    preview.failure !== null && preview.failure.code !== "MARKET_DATA_NOT_READY";
+  const marketReady = mode === "REPLAY" || freshJuryCount >= 3;
+  const canRecord = marketReady && (action === "WAIT" || Boolean(preview?.recordable && quoteFresh));
+
+  const record = async () => {
+    setRecordPending(true);
+    setRequestError(null);
+    try {
+      const response = await fetch("/api/paper-orders", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": recordKey },
+        body: JSON.stringify({
+          action,
+          previewId: action === "WAIT" ? null : preview?.previewId ?? null,
+          provider: action === "WAIT" ? null : preview?.provider ?? null
+        })
+      });
+      setOrder(await responseBody<PaperApiOrder>(response, "order"));
+    } catch (reason) {
+      setRequestError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRecordPending(false);
+    }
+  };
+
+  const providerLabel = preview?.provider === "jupiter" ? "JUPITER FALLBACK" : "0x PRIMARY";
+  const output = action === "BUY"
+    ? preview?.estimatedOutputSOL ? `${Number(preview.estimatedOutputSOL).toFixed(4)} SOL` : "UNAVAILABLE"
+    : preview?.estimatedOutputUSDC ? `${money(Number(preview.estimatedOutputUSDC))} USDC` : "UNAVAILABLE";
+  const minimumOutput = preview?.minimumOutputAmount
+    ? action === "BUY" ? `${Number(preview.minimumOutputAmount).toFixed(4)} SOL` : `${money(Number(preview.minimumOutputAmount))} USDC`
+    : "NOT PROVIDED";
+
   return (
     <div className="drawer-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <aside className="paper-drawer" role="dialog" aria-modal="true" aria-labelledby="paper-title">
         <div className="drawer-heading">
-          <div><span className="kicker">{preview.mode === "LIVE" ? "LIVE PREVIEW CONTRACT" : "REPLAYED PREVIEW CONTRACT"}</span><h2 id="paper-title">{action === "WAIT" ? "RECORD WAIT" : `PAPER ${action}`}</h2></div>
+          <div><span className="kicker">{mode === "LIVE" ? "ACTION-TIME LIVE ESTIMATE" : "REPLAYED PREVIEW CONTRACT"}</span><h2 id="paper-title">{action === "WAIT" ? "RECORD WAIT" : `PAPER ${action}`}</h2></div>
           <button className="icon-button" type="button" onClick={onClose} aria-label="Close paper drawer">×</button>
         </div>
-        <div className="drawer-warning"><strong>{preview.mode === "LIVE" ? "LIVE QUOTE NOT REQUESTED" : "REPLAY FIXTURE · NOT A LIVE QUOTE"}</strong><span>Zero signing, zero funds, nothing broadcast.</span></div>
+        <div className={`drawer-warning ${preview?.status === "READY" && quoteFresh ? "ready" : ""}`}>
+          <strong>{!marketReady ? "MARKET DATA NOT READY" : pending ? "REQUESTING FRESH ESTIMATE" : action === "WAIT" ? "NO QUOTE REQUIRED" : preview?.status === "READY" ? quoteFresh ? "FRESH PAPER ESTIMATE" : "ESTIMATE EXPIRED" : preview?.failure?.code ?? "ESTIMATE UNAVAILABLE"}</strong>
+          <span>{mode === "REPLAY" ? "Frozen replay response; " : ""}Zero signing, zero funds, nothing broadcast.</span>
+        </div>
         {action === "WAIT" ? (
-          <div className="wait-copy"><strong>No execution estimate required.</strong><p>The current verdict and all four jury snapshots would be captured as a deliberate wait decision in SIDE-010.</p></div>
+          <div className="wait-copy"><strong>No execution estimate required.</strong><p>The current verdict, four jury snapshots and source-health evidence will be captured as a deliberate WAIT decision.</p></div>
         ) : (
           <div className="preview-table">
             <div><span>DIRECTION</span><strong>{action} SOL</strong></div>
-            <div><span>PAIR</span><strong>{preview.pair}</strong></div>
+            <div><span>PAIR</span><strong>SOL-USDC</strong></div>
             <div><span>NOTIONAL</span><strong>$10,000 USDC</strong></div>
-            <div><span>PROVIDER</span><strong>{preview.provider ? "0x PRIMARY" : "NOT REQUESTED"}</strong></div>
-            <div><span>QUOTE AGE</span><strong>{hasPreview && preview.quoteAgeMs !== null ? `${(preview.quoteAgeMs / 1_000).toFixed(1)}S` : "—"}</strong></div>
-            <div className="emphasis-row"><span>ESTIMATED OUTPUT</span><strong>{hasPreview && preview.estimatedOutputSOL !== null ? `${Number(preview.estimatedOutputSOL).toFixed(2)} SOL` : "UNAVAILABLE"}</strong></div>
-            <div><span>MINIMUM OUTPUT</span><strong>NOT SUPPLIED</strong></div>
-            <div><span>PRICE IMPACT</span><strong>NOT SUPPLIED BY 0x</strong></div>
-            <div><span>FEE BREAKDOWN</span><strong>NOT SUPPLIED BY 0x</strong></div>
+            <div><span>PROVIDER</span><strong>{preview ? providerLabel : "REQUESTING"}</strong></div>
+            <div><span>QUOTE AGE / TTL</span><strong>{quoteAgeMs === null ? "—" : `${(quoteAgeMs / 1_000).toFixed(1)}S / 2.0S`}</strong></div>
+            {action === "SELL" ? <div><span>ANCHOR-DERIVED INPUT</span><strong>{preview?.inputAmountSOL ? `${Number(preview.inputAmountSOL).toFixed(4)} SOL` : "—"}</strong></div> : null}
+            <div className="emphasis-row"><span>ESTIMATED OUTPUT</span><strong>{pending ? "REQUESTING" : output}</strong></div>
+            <div><span>MINIMUM OUTPUT</span><strong>{minimumOutput}</strong></div>
+            <div><span>REFERENCE PX</span><strong>{preview?.referencePxQuotePerSol ? `${money(Number(preview.referencePxQuotePerSol))} / SOL` : "—"}</strong></div>
+            <div><span>PRICE IMPACT</span><strong>{preview?.directional?.provider === "jupiter" ? "PROVIDER ESTIMATE" : "NOT PROVIDED BY 0x"}</strong></div>
+            <div><span>FEE BREAKDOWN</span><strong>UNKNOWN · NOT FABRICATED</strong></div>
           </div>
         )}
-        {action === "SELL" ? <p className="inline-warning">The replay fixture has no fresh USDC→SOL anchor, so the $10k SELL exact-in amount cannot be derived safely.</p> : null}
-        {hasPreview ? <details open><summary>WHY THIS PRICE?</summary><ul>{preview.routeSummary.map((line) => <li key={line}>{line}</li>)}{preview.mode === "REPLAY" ? <li>Measured at replay decision time</li> : null}</ul></details> : null}
-        <button className="record-button" type="button" disabled>{action === "WAIT" ? "RECORD WAIT" : `RECORD PAPER ${action}`}</button>
-        <p className="disabled-note">Recording remains server-disabled until SIDE-010. No wallet or send code exists.</p>
+        {preview?.status === "READY" ? <details open><summary>ESTIMATE AUDIT</summary><ul>{preview.routeSummary.map((line) => <li key={line}>{line}</li>)}{preview.anchor ? <li>Anchor request: {preview.anchor.requestId}</li> : null}{preview.directional ? <li>Directional request: {preview.directional.requestId}</li> : null}<li>Raw responses discarded after SHA-256 hashing</li></ul></details> : null}
+        {canFallback ? <button className="fallback-button" type="button" disabled={pending} onClick={() => void loadPreview("jupiter", preview.failure?.failureId ?? null)}>TRY JUPITER ESTIMATE</button> : null}
+        {action !== "WAIT" && (!preview || preview.status === "UNAVAILABLE" || !quoteFresh) ? <button className="refresh-button" type="button" disabled={pending} onClick={() => void loadPreview("zeroex", null)}>REFRESH 0x ESTIMATE</button> : null}
+        {requestError ? <p className="inline-warning" role="alert">{requestError}</p> : null}
+        {order ? <p className="record-success"><strong>RECORDED · {order.action}</strong><span>{order.orderId} · volatile until SIDE-011 persistence</span></p> : null}
+        <button className="record-button" type="button" disabled={!canRecord || pending || recordPending || order !== null} onClick={() => void record()}>{recordPending ? "RECORDING" : order ? "RECORDED" : action === "WAIT" ? "RECORD WAIT" : `RECORD PAPER ${action}`}</button>
+        <p className="disabled-note">Paper evidence only. No wallet, signer, assembly, simulation or send path exists.</p>
       </aside>
     </div>
   );
@@ -519,19 +709,31 @@ export function App() {
 
       <section className="cockpit" aria-label="SOL cross-market cockpit">
         <div className="power-board">
-          <PowerQuadrant market="spot" side="buy" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
-          <PowerQuadrant market="spot" side="sell" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
-          <PowerQuadrant market="perp" side="buy" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
-          <PowerQuadrant market="perp" side="sell" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
+          <PowerRow market="spot" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
+          <article className={`verdict-card ${verdictClass(verdict.verdict)}`} aria-label="Market verdict">
+            <div className="verdict-side-action buy">
+              <button type="button" className="buy-action" onClick={() => setPaperAction("BUY")}>PAPER BUY</button>
+            </div>
+            <div className="verdict-main">
+              <div className="verdict-summary">
+                <span className="kicker">MARKET VERDICT · {snapshot.signal.modelVersion.toUpperCase()}</span>
+                <h1>{verdict.verdict.replaceAll("_", " ")}</h1>
+                <strong className="agreement">{agreementLabel(snapshot.signal)}</strong>
+              </div>
+              <div className="verdict-context">
+                <p>{narrative(snapshot.signal)}</p>
+                <div className="verdict-context-bottom">
+                  <div className="leader-row"><span>FIRST OBSERVED BY SIDE</span><strong>{leading}</strong></div>
+                  <button type="button" className="wait-action" onClick={() => setPaperAction("WAIT")}>RECORD WAIT</button>
+                </div>
+              </div>
+            </div>
+            <div className="verdict-side-action sell">
+              <button type="button" className="sell-action" onClick={() => setPaperAction("SELL")}>PAPER SELL</button>
+            </div>
+          </article>
+          <PowerRow market="perp" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} />
         </div>
-        <article className={`verdict-card ${verdictClass(verdict.verdict)}`} aria-label="Market verdict">
-          <span className="kicker">MARKET VERDICT · {snapshot.signal.modelVersion.toUpperCase()}</span>
-          <h1>{verdict.verdict.replaceAll("_", " ")}</h1>
-          <strong className="agreement">{agreementLabel(snapshot.signal)}</strong>
-          <p>{narrative(snapshot.signal)}</p>
-          <div className="leader-row"><span>FIRST OBSERVED BY SIDE</span><strong>{leading}</strong></div>
-          <div className="verdict-actions"><button type="button" className="buy-action" onClick={() => setPaperAction("BUY")}>PAPER BUY</button><button type="button" className="wait-action" onClick={() => setPaperAction("WAIT")}>RECORD WAIT</button><button type="button" className="sell-action" onClick={() => setPaperAction("SELL")}>PAPER SELL</button></div>
-        </article>
       </section>
 
       <section className="power-balance" aria-label="Five minute buy sell power balance">
@@ -562,7 +764,7 @@ export function App() {
       </section>
 
       <footer><span>{snapshot.mode === "LIVE" ? "S0 · LIVE INGEST" : "R0 · REPLAY RUNNABLE"}</span><span>Motion {suspended ? "paused" : "active"} · seeded by event ID · hidden-page snapshot recovery</span></footer>
-      {paperAction ? <PaperDrawer action={paperAction} preview={snapshot.paperPreview} onClose={() => setPaperAction(null)} /> : null}
+      {paperAction ? <PaperDrawer action={paperAction} mode={snapshot.mode} freshJuryCount={verdict.freshJuryCount} onClose={() => setPaperAction(null)} /> : null}
     </main>
   );
 }
