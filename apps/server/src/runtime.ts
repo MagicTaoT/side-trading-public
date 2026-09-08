@@ -1,5 +1,10 @@
 import { parseMarketEvent, parseUiEvent, type MarketEvent, type UiEvent } from "@side/market-core";
-import { decodeEventLog, ManualReplayClock, replayEvents } from "@side/recorder-replay";
+import {
+  decodeEventLog,
+  ManualReplayClock,
+  replayEventsWithFixedTicks,
+  type EventRecorder
+} from "@side/recorder-replay";
 import { S0SignalEngine, type S0Segment } from "@side/signal-engine";
 import Decimal from "decimal.js";
 import type {
@@ -185,7 +190,8 @@ export class S0Runtime {
     private readonly replayJsonl: string,
     private readonly queueCapacity = 64,
     private readonly mode: "LIVE" | "REPLAY" = "REPLAY",
-    private readonly cexProfile: "coinbase" | "binance" | "unavailable" = "coinbase"
+    private readonly cexProfile: "coinbase" | "binance" | "unavailable" = "coinbase",
+    private readonly eventRecorder?: EventRecorder
   ) {
     this.#replayStatus = mode === "LIVE" ? "disabled" : "idle";
   }
@@ -260,16 +266,29 @@ export class S0Runtime {
 
   startReplay(onObservation?: (point: ReplayObservationPoint) => void): RuntimeSnapshot {
     if (this.mode === "LIVE") throw new Error("Replay controls are disabled in LIVE mode");
+    return this.startReplayEvents(decodeEventLog(this.replayJsonl), onObservation);
+  }
+
+  startReplayEvents(
+    events: readonly MarketEvent[],
+    onObservation?: (point: ReplayObservationPoint) => void,
+    endAtReceivedMs?: number
+  ): RuntimeSnapshot {
+    if (this.mode === "LIVE") throw new Error("Replay controls are disabled in LIVE mode");
     this.#reset();
     this.#replayStatus = "running";
-    const events = decodeEventLog(this.replayJsonl);
-    replayEvents(events, new ManualReplayClock(0), ({ event, replayClockMs }) => {
-      this.#ingest(event);
-      onObservation?.({
-        elapsedMs: replayClockMs,
-        referenceAtMs: event.receivedAtUnixMs
-      });
-    });
+    replayEventsWithFixedTicks(
+      events,
+      new ManualReplayClock(0),
+      {
+        onEvent: ({ event }) => this.#ingest(event),
+        onTick: ({ elapsedMs, referenceAtMs }) => {
+          this.tick(referenceAtMs);
+          onObservation?.({ elapsedMs, referenceAtMs });
+        }
+      },
+      endAtReceivedMs === undefined ? {} : { endAtReceivedMs }
+    );
     this.#replayStatus = "completed";
     this.#broadcast({ type: "state_snapshot", snapshot: this.snapshot() });
     return this.snapshot();
@@ -310,6 +329,11 @@ export class S0Runtime {
       this.#seenLiveEventIds.delete(this.#seenLiveEventIds.values().next().value as string);
     }
     this.#ingest(event, true);
+    try {
+      this.eventRecorder?.record(event);
+    } catch {
+      // Recording health is exposed separately; a failed disk must not stop the live market runtime.
+    }
     return event;
   }
 

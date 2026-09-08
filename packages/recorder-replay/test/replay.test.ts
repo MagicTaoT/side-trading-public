@@ -6,7 +6,8 @@ import {
   encodeEventLog,
   ManualReplayClock,
   orderForReplay,
-  replayEvents
+  replayEvents,
+  replayEventsWithFixedTicks
 } from "../src/index.js";
 
 const fixturePath = fileURLToPath(new URL("./fixtures/golden/spot-led.jsonl", import.meta.url));
@@ -58,5 +59,27 @@ describe("deterministic replay", () => {
   it("rejects duplicate event ids even when sequence differs", () => {
     const [event] = decodeEventLog(fixture);
     expect(() => orderForReplay([event, { ...event, ingestSeq: "999" }])).toThrow(/Duplicate eventId/u);
+  });
+
+  it("emits all observed events before deterministic one-second strategy ticks", () => {
+    const events = decodeEventLog(fixture);
+    const timeline: string[] = [];
+    replayEventsWithFixedTicks(
+      events,
+      new ManualReplayClock(10_000),
+      {
+        onEvent: ({ event, replayClockMs }) => timeline.push(`event:${event.ingestSeq}:${replayClockMs}`),
+        onTick: ({ elapsedMs, replayClockMs }) => timeline.push(`tick:${elapsedMs}:${replayClockMs}`)
+      }
+    );
+
+    expect(timeline).toEqual([
+      "event:100:10000",
+      "tick:0:10000",
+      "event:101:10025",
+      "tick:1000:11000",
+      "event:102:11190",
+      "tick:2000:12000"
+    ]);
   });
 });

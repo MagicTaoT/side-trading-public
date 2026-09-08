@@ -1,7 +1,7 @@
 # SIDE - 技术架构与数据接入规范
 
-状态：运行基线 v0.3；SIDE-001 source decision frozen
-日期：2026-09-04
+状态：运行基线 v0.4；SIDE-001 source decision frozen
+日期：2026-09-08
 原则：单机可部署、模块可替换、事件可回放、信号可解释、执行默认 fail-closed。
 
 ## 1. 推荐架构
@@ -92,7 +92,7 @@ infra/
 docs/
 ```
 
-SIDE-020 在 signal 与 execution 之间增加独立的策略 adapter/coordinator：adapter 将离散 verdict 映射成 versioned scalar edge，`@side/strategy-engine` 只接收 observation 并保持确定性状态，server coordinator 负责理论参考价、单 active run、原子 event batch、无事件 checkpoint、失败后 journal reconciliation 与轻量 restart recovery。REPLAY 只按录制事件间隔驱动，完成后的冻结 signal 不再被 wall clock 重采样；LIVE 才使用每秒 tick。event journal 保存 delta，完整 basket 独立持久化。它不复用人工 `PaperEstimateBroker`，因此未来将理论价替换为 perp depth/limit execution adapter 时，不会改变现有 0x preview/record 安全边界。首版假设单 server process；多副本执行前仍需增加 worker lease。
+SIDE-020 在 signal 与 execution 之间增加独立的策略 adapter/coordinator：adapter 将离散 verdict 映射成 versioned scalar edge，`@side/strategy-engine` 只接收 observation 并保持确定性状态，server coordinator 负责理论参考价、单 active run、原子 event batch、无事件 checkpoint、失败后 journal reconciliation 与轻量 restart recovery。LIVE 每秒 tick；REPLAY/backtest 使用录制的 LIVE observation tape，旧数据集才以固定 1 秒虚拟 tick 重建，完成后的冻结 signal 不会被 wall clock 重采样。event journal 保存 delta，完整 basket 独立持久化。它不复用人工 `PaperEstimateBroker`，因此未来将理论价替换为 perp depth/limit execution adapter 时，不会改变现有 0x preview/record 安全边界。首版假设单 server process；多副本执行前仍需增加 worker lease。
 
 建议库类别而非固定版本：React、TypeScript、Fastify、原生 WebSocket client、Zod/Valibot 一类 schema validator、Decimal.js 一类十进制定点库、PostgreSQL。版本在 scaffold 时锁定并提交 lockfile。
 
@@ -837,9 +837,11 @@ data/events/2026-09-04/13/hyperliquid-perp.ndjson.zst
 data/events/2026-09-04/13/bitquery-solana-dex.ndjson.zst
 ```
 
-S0 默认不持续落盘全部原始行情：内存只保留当前 5 分钟 rolling state，长期存 decision snapshot、+5m markout、source-health transition 与用户显式开启的一段 golden replay recording。M0 才启用可配置、按容量/时长轮转的 NDJSON.zst/Parquet event retention。每条落盘记录必须包含 `ingestSeq`、schema/model/config version；分片 manifest 保存首尾 sequence、record count 与 checksum，避免 crash 后把截断的压缩文件当完整日志。压缩与重型 onchain decode 不阻塞 Node event loop，放入 worker thread/独立 worker queue。
+SIDE-021 起，LIVE 默认持续记录通过 schema/dedupe/ordering gate 的 canonical event，并同时记录与 LIVE 策略评估完全相同的每秒 observation tape。首版按 UTC hour/provider 写 `.ndjson.partial`，正常关闭时计算 SHA-256、改名为 `.ndjson` 并将 dataset manifest 标记为 `COMPLETE`；OPEN/FAILED dataset 不允许进入 backtest。后续容量升级仍使用 NDJSON.zst/Parquet rotation。每条 event 保留 `ingestSeq` 和 schema version；manifest 保存首尾 sequence、record count、provider/model coverage、partition checksum 与 dataset fingerprint。异步串行 writer 不阻塞 adapter callback；任何写入错误会把 recorder 标记为 FAILED，而不是把不完整数据包装成可回测数据集。
 
-Replay 使用虚拟时钟读取相同 canonical events，不重新调用外部 API，并按 `ingestSeq` 稳定合并不同分片。Replay UI 必须显式标识，不能冒充 live；eventId 与 visual seed 原样复用。
+Replay 使用虚拟时钟读取相同 canonical events，不重新调用外部 API，并按 `ingestSeq` 稳定合并不同分片。所有在 tick 前收到的 event 先更新 runtime，然后每 1 秒执行 signal freshness/prune 与 strategy observation；最后一个 event 后补齐到下一完整 tick。Backtest 优先读取实际 LIVE observation tape，以保留真实 timer jitter；没有 tape 的 canonical dataset 才使用固定 1 秒 reconstructed timeline。Replay UI 必须显式标识，不能冒充 live；eventId 与 visual seed 原样复用。
+
+Batch backtest 先将一个 COMPLETE dataset prepare 成 immutable observation sequence，再让最多 128 个 validated/deduplicated configs 复用，避免参数网格按 variant 重读 partition。experiment metadata 与 variant result 分文件原子持久化在 `data/backtests/`；列表只携带 config 与 summary，完整 equity/basket/fill result 按需读取。当前 queue 为单进程串行模型，重启时非终态工作明确失败；扩展到多 worker 前必须增加 lease、attempt fencing 与幂等 result commit。
 
 ---
 

@@ -51,6 +51,7 @@ export function StrategyPage() {
         <nav className="status-strip page-navigation" aria-label="Page navigation and runtime status">
           <a className="page-nav-link" href="/">MARKET DASHBOARD</a>
           <a className="page-nav-link active" href="/strategy" aria-current="page">AUTO STRATEGY</a>
+          <a className="page-nav-link" href="/backtest">BACKTEST</a>
           <strong className="mode-pill">{runtime.mode}</strong>
           <span className="paper-pill">DRY RUN ONLY</span>
           <span className={`strategy-input-state ${runtimeError ? "error" : inputsActive ? "active" : "paused"}`}>

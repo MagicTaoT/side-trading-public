@@ -1,7 +1,10 @@
 import websocket from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
 import type WebSocket from "ws";
+import type { EventRecorder } from "@side/recorder-replay";
 import { StrategyConfigError, type StrategyConfigV1, type StrategyObservation } from "@side/strategy-engine";
+import { BacktestError, BacktestRunner } from "./backtest/runner.js";
+import { BacktestExperimentService } from "./backtest/experiments.js";
 import { LiveCoordinator } from "./live/coordinator.js";
 import { PaperEstimateBroker, PaperPolicyError } from "./paper/broker.js";
 import type { PaperAction, PaperProvider, PaperSide } from "./paper/contracts.js";
@@ -36,6 +39,9 @@ export interface CreateAppOptions {
   paperBroker?: PaperEstimateBroker;
   journal?: DecisionJournal;
   strategyJournal?: StrategyJournal;
+  eventRecorder?: EventRecorder;
+  recordingRootDir?: string;
+  backtestResultRootDir?: string;
 }
 
 const MAX_SOCKET_BUFFER_BYTES = 256 * 1024;
@@ -85,6 +91,19 @@ function strategyError(reply: { code(statusCode: number): { send(value: unknown)
   return reply.code(500).send({ error: { code: "STRATEGY_ERROR" } });
 }
 
+function backtestError(reply: { code(statusCode: number): { send(value: unknown): unknown } }, reason: unknown): unknown {
+  if (reason instanceof PaperPolicyError) {
+    return reply.code(reason.statusCode).send({ error: { code: reason.code } });
+  }
+  if (reason instanceof BacktestError) {
+    return reply.code(reason.statusCode).send({ error: { code: reason.code } });
+  }
+  if (reason instanceof StrategyConfigError) {
+    return reply.code(400).send({ error: { code: reason.code } });
+  }
+  return reply.code(500).send({ error: { code: "BACKTEST_ERROR" } });
+}
+
 function boundedLimit(value: string | undefined, fallback: number, maximum: number): number {
   const parsed = Number.parseInt(value ?? String(fallback), 10);
   return Number.isSafeInteger(parsed) ? Math.min(maximum, Math.max(1, parsed)) : fallback;
@@ -100,13 +119,38 @@ function optionalStrategyId(value: string | undefined): string | undefined {
 export async function createApp(options: CreateAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: options.logger ?? false });
   const mode = options.mode ?? "REPLAY";
-  const runtime = new S0Runtime(options.replayJsonl, options.queueCapacity, mode, options.cexProfile ?? "coinbase");
+  const runtime = new S0Runtime(
+    options.replayJsonl,
+    options.queueCapacity,
+    mode,
+    options.cexProfile ?? "coinbase",
+    options.eventRecorder
+  );
   const strategy = new StrategyCoordinator(options.strategyJournal ?? new MemoryStrategyJournal());
+  const backtests = options.recordingRootDir ? new BacktestRunner(options.recordingRootDir) : null;
+  const backtestExperiments = backtests && options.backtestResultRootDir
+    ? new BacktestExperimentService(backtests, options.backtestResultRootDir)
+    : null;
   await strategy.initialize();
+  await backtestExperiments?.initialize();
   let lastReplayObservation: StrategyObservation | null = null;
+  let closing = false;
   const observeLiveStrategy = async (atMs = Date.now()) => {
     const signal = runtime.snapshot().signal;
-    await strategy.evaluate(strategyObservation(signal, runtime.paperDryReference(atMs), atMs));
+    const observation = strategyObservation(signal, runtime.paperDryReference(atMs), atMs);
+    try {
+      options.eventRecorder?.recordObservation({
+        schemaVersion: 1,
+        ...observation,
+        signalModelVersion: signal.modelVersion,
+        asOfIngestSeq: signal.asOfIngestSeq,
+        freshJuryCount: signal.verdict.freshJuryCount,
+        coverageState: signal.verdict.dataState
+      });
+    } catch (reason) {
+      app.log.error({ err: reason }, "Strategy observation recording failed");
+    }
+    await strategy.evaluate(observation);
   };
   const evidence = () => {
     const snapshot = runtime.snapshot();
@@ -187,6 +231,79 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   }));
   app.get("/health/sources", async () => ({ mode: runtime.snapshot().mode, sources: runtime.snapshot().sources }));
   app.get("/api/state", async () => runtime.snapshot());
+  app.get("/api/recording/status", async () => options.eventRecorder?.status() ?? { enabled: false as const });
+  app.get("/api/backtest-datasets", async (_request, reply) => {
+    if (!backtests) return reply.send({ datasets: [] });
+    try {
+      return reply.send({ datasets: await backtests.listDatasets() });
+    } catch (reason) {
+      return backtestError(reply, reason);
+    }
+  });
+  app.post<{ Body: unknown }>("/api/backtests", async (request, reply) => {
+    if (!backtests) return reply.code(503).send({ error: { code: "BACKTEST_STORAGE_NOT_CONFIGURED" } });
+    try {
+      const body = object(request.body);
+      if (typeof body.datasetId !== "string" || body.datasetId.trim().length === 0 || body.config === undefined) {
+        throw new BacktestError(400, "INVALID_BACKTEST_REQUEST");
+      }
+      return reply.send({ result: await backtests.run(body.datasetId.trim(), body.config) });
+    } catch (reason) {
+      return backtestError(reply, reason);
+    }
+  });
+  app.get<{ Querystring: { limit?: string } }>("/api/backtest-experiments", async (request, reply) => {
+    if (!backtestExperiments) return reply.send({ experiments: [] });
+    return reply.send({ experiments: backtestExperiments.list(boundedLimit(request.query.limit, 30, 100)) });
+  });
+  app.post<{ Body: unknown }>("/api/backtest-experiments", async (request, reply) => {
+    if (!backtestExperiments) {
+      return reply.code(503).send({ error: { code: "BACKTEST_STORAGE_NOT_CONFIGURED" } });
+    }
+    try {
+      return reply.code(202).send({ experiment: await backtestExperiments.create(request.body) });
+    } catch (reason) {
+      return backtestError(reply, reason);
+    }
+  });
+  app.get<{ Params: { experimentId: string } }>("/api/backtest-experiments/:experimentId", async (request, reply) => {
+    if (!backtestExperiments) {
+      return reply.code(503).send({ error: { code: "BACKTEST_STORAGE_NOT_CONFIGURED" } });
+    }
+    try {
+      const experiment = backtestExperiments.get(request.params.experimentId);
+      return experiment
+        ? reply.send({ experiment })
+        : reply.code(404).send({ error: { code: "BACKTEST_EXPERIMENT_NOT_FOUND" } });
+    } catch (reason) {
+      return backtestError(reply, reason);
+    }
+  });
+  app.post<{ Params: { experimentId: string } }>("/api/backtest-experiments/:experimentId/cancel", async (request, reply) => {
+    if (!backtestExperiments) {
+      return reply.code(503).send({ error: { code: "BACKTEST_STORAGE_NOT_CONFIGURED" } });
+    }
+    try {
+      return reply.send({ experiment: await backtestExperiments.cancel(request.params.experimentId) });
+    } catch (reason) {
+      return backtestError(reply, reason);
+    }
+  });
+  app.get<{ Params: { experimentId: string; variantId: string } }>(
+    "/api/backtest-experiments/:experimentId/variants/:variantId",
+    async (request, reply) => {
+      if (!backtestExperiments) {
+        return reply.code(503).send({ error: { code: "BACKTEST_STORAGE_NOT_CONFIGURED" } });
+      }
+      try {
+        return reply.send({
+          result: await backtestExperiments.result(request.params.experimentId, request.params.variantId)
+        });
+      } catch (reason) {
+        return backtestError(reply, reason);
+      }
+    }
+  );
   app.get("/api/websockets/status", async () => websocketStatus());
   app.post("/api/websockets/disconnect", async () => {
     const wasEnabled = websocketsEnabled;
@@ -419,6 +536,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     markoutWorker.start();
     if (live) {
       tickTimer = setInterval(() => {
+        if (closing) return;
         const atMs = Date.now();
         runtime.tick(atMs);
         void observeLiveStrategy(atMs).catch((reason) => app.log.error({ err: reason }, "Strategy evaluation failed"));
@@ -427,12 +545,17 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     }
   });
   app.addHook("onClose", async () => {
+    closing = true;
     if (tickTimer) clearInterval(tickTimer);
     markoutWorker.stop();
     live?.stop();
     for (const socket of dashboardSockets.keys()) removeDashboardSocket(socket);
-    await strategy.close();
-    await paper.journal.close();
+    await Promise.all([
+      backtestExperiments?.close() ?? Promise.resolve(),
+      strategy.close(),
+      paper.journal.close(),
+      options.eventRecorder?.close() ?? Promise.resolve()
+    ]);
   });
 
   return app;

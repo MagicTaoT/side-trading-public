@@ -7,6 +7,8 @@ const strategyPage = readFileSync(new URL("./strategy/StrategyPage.tsx", import.
 const strategyPageCss = readFileSync(new URL("./strategy/strategy-page.css", import.meta.url), "utf8");
 const strategyPanel = readFileSync(new URL("./strategy/StrategyPanel.tsx", import.meta.url), "utf8");
 const strategyHistoryCss = readFileSync(new URL("./strategy/strategy-history.css", import.meta.url), "utf8");
+const backtestPage = readFileSync(new URL("./backtest/BacktestPage.tsx", import.meta.url), "utf8");
+const backtestPageCss = readFileSync(new URL("./backtest/backtest-page.css", import.meta.url), "utf8");
 const verdictCardBlock = css.match(/\.verdict-card\s*\{([^}]*)\}/)?.[1] ?? "";
 
 describe("cockpit responsive contract", () => {
@@ -57,18 +59,18 @@ describe("cockpit responsive contract", () => {
     expect(css).toMatch(/\.window-switching \.trade-bubble[\s\S]*?animation:\s*none/);
   });
 
-  it("keeps durable shadow performance visible outside the paper drawer", () => {
-    expect(app).toMatch(/<ShadowPerformance[\s\S]*?<section className="source-coverage"/);
-    expect(app).toContain('fetch("/api/shadow-performance")');
-    expect(app).toContain('fetch("/api/paper-orders?limit=12")');
-    expect(css).toMatch(/\.shadow-metrics\s*\{[\s\S]*?grid-template-columns:\s*repeat\(6/);
-    expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*?\.shadow-metrics\s*\{[\s\S]*?repeat\(2/);
+  it("archives the shadow journal and paper action drawer from the dashboard", () => {
+    expect(app).not.toContain("<ShadowPerformance");
+    expect(app).not.toContain('fetch("/api/shadow-performance")');
+    expect(app).not.toContain('fetch("/api/paper-orders?limit=12")');
+    expect(app).not.toContain("<PaperDrawer action=");
+    expect(app).not.toContain("setPaperAction(");
   });
 
   it("keeps auto strategy on a dedicated page instead of the market dashboard", () => {
     expect(app).not.toContain("<StrategyPanel");
     expect(app).toContain('href="/strategy">AUTO STRATEGY</a>');
-    expect(app).toContain('path === "/strategy" ? <StrategyPage /> : <DashboardPage />');
+    expect(app).toContain('if (path === "/strategy") return <StrategyPage />');
     expect(strategyPage).toContain("<StrategyPanel mode={runtime.mode} />");
     expect(strategyPage).toContain('href="/">MARKET DASHBOARD</a>');
     expect(strategyPageCss).toContain(".strategy-page-shell");
@@ -79,6 +81,19 @@ describe("cockpit responsive contract", () => {
     expect(strategyHistoryCss).toContain(".strategy-event-scroll");
   });
 
+  it("provides a dedicated backtest lab with durable history and drill-down", () => {
+    expect(app).toContain('if (path === "/backtest") return <BacktestPage />');
+    expect(app).toContain('href="/backtest">BACKTEST</a>');
+    expect(strategyPage).toContain('href="/backtest">BACKTEST</a>');
+    expect(backtestPage).toContain("PARAMETER GRID");
+    expect(backtestPage).toContain("SAVED CONFIGS");
+    expect(backtestPage).toContain('aria-label="Backtest variant leaderboard"');
+    expect(backtestPage).toContain('aria-label="Equity curve"');
+    expect(backtestPage).toContain('aria-label="Basket fill sequence"');
+    expect(backtestPageCss).toMatch(/\.backtest-workspace\s*\{[\s\S]*?grid-template-columns/);
+    expect(backtestPageCss).toMatch(/@media \(max-width: 760px\)[\s\S]*?\.basket-browser/);
+  });
+
   it("exposes detailed bubble evidence on pointer or keyboard focus", () => {
     expect(app).toContain("bubbleAuditLabel(event, evaluatedAtMs)");
     expect(app).toContain("onPointerEnter");
@@ -86,19 +101,12 @@ describe("cockpit responsive contract", () => {
     expect(app).toContain('className="bubble-inspector"');
   });
 
-  it("shows display-only paper prices and refreshes the action quote every five seconds", () => {
+  it("keeps display-only buy and sell prices around the central edge", () => {
     expect(app).toContain('fetch("/api/paper-prices")');
-    expect(app).toMatch(/<PaperPriceButton side="BUY"[\s\S]*?<PaperPriceButton side="SELL"/);
-    expect(app).toContain('window.setTimeout(() => void loadPreview("zeroex", null), 5_000)');
+    expect(app).toMatch(/<PaperPriceTile side="BUY"[\s\S]*?verdict-main[\s\S]*?<PaperPriceTile side="SELL"/);
+    expect(app).toContain("Five-second display estimate. Display only.");
+    expect(app).not.toMatch(/<PaperPriceTile[^>]*onClick=/);
     expect(app).toContain('price.source === "coinbase-dry" ? "COINBASE USD" : "BITQUERY"');
-  });
-
-  it("shows the persisted entry edge and uses two-step deletion for every decision row", () => {
-    expect(app).toContain("ENTRY EDGE");
-    expect(app).toContain("entryEdge(order)");
-    expect(app).toContain('method: "DELETE"');
-    expect(app).toContain('deleteCandidate === order.orderId ? "CONFIRM" : "DELETE"');
-    expect(css).toContain(".decision-delete.confirm");
   });
 
   it("keeps reversible WebSocket resource controls at the bottom of the dashboard", () => {

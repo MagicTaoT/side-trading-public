@@ -1,6 +1,6 @@
 {
   "name": "side-trading",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.5.2",
@@ -16,6 +16,6 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
-    "vitest": "^3.2.0"
+    "vitest": "^4.1.11"
   }
 }

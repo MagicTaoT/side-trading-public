@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { parseMarketEvent } from "@side/market-core";
 import { S0Runtime } from "../src/runtime.js";
+import { strategyObservation } from "../src/strategy/coordinator.js";
 
-function base(eventId: string, kind: "trade" | "source-health", payload: Record<string, unknown>) {
+function base(eventId: string, kind: "trade" | "bbo" | "source-health", payload: Record<string, unknown>) {
   return {
     schemaVersion: 1,
     eventId,
@@ -93,5 +95,38 @@ describe("S0Runtime LIVE mode", () => {
     expect(runtime.snapshot().recentUiEvents).toHaveLength(51);
     runtime.tick(301_051);
     expect(runtime.snapshot().recentUiEvents).toHaveLength(0);
+  });
+
+  it("produces the same one-second strategy observations in LIVE and fixed-tick replay", () => {
+    const drafts = [
+      { ...base("coinbase:trade:parity-1", "trade", { px: "100", sizeNative: "5", sizeSOL: "5", aggressor: "buy", tradeId: "parity-1" }), receivedAtUnixMs: 1_001 },
+      { ...base("coinbase:bbo:parity-2", "bbo", { bidPx: "100", bidSizeNative: "2", bidSizeSOL: "2", askPx: "102", askSizeNative: "2", askSizeSOL: "2" }), receivedAtUnixMs: 1_026 },
+      { ...base("coinbase:trade:parity-3", "trade", { px: "103", sizeNative: "5", sizeSOL: "5", aggressor: "buy", tradeId: "parity-3" }), receivedAtUnixMs: 2_191 }
+    ];
+    const observe = (runtime: S0Runtime, atMs: number) => {
+      const signal = runtime.snapshot().signal;
+      return strategyObservation(signal, runtime.paperDryReference(atMs), atMs);
+    };
+
+    const live = new S0Runtime("", 64, "LIVE", "coinbase");
+    const liveObservations = [];
+    live.ingestLive(drafts[0] as Record<string, unknown>);
+    live.tick(1_001);
+    liveObservations.push(observe(live, 1_001));
+    live.ingestLive(drafts[1] as Record<string, unknown>);
+    live.tick(2_001);
+    liveObservations.push(observe(live, 2_001));
+    live.ingestLive(drafts[2] as Record<string, unknown>);
+    live.tick(3_001);
+    liveObservations.push(observe(live, 3_001));
+
+    const replayEvents = drafts.map((draft, index) => parseMarketEvent({ ...draft, ingestSeq: String(index + 1) }));
+    const replay = new S0Runtime("", 64, "REPLAY", "coinbase");
+    const replayObservations: ReturnType<typeof observe>[] = [];
+    replay.startReplayEvents(replayEvents, ({ referenceAtMs }) => {
+      replayObservations.push(observe(replay, referenceAtMs));
+    });
+
+    expect(replayObservations).toEqual(liveObservations);
   });
 });

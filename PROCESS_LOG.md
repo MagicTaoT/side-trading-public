@@ -133,3 +133,28 @@
 - Version：root、apps 与全部 workspace packages 统一升级为 `0.3.0`，release tag 使用 `v0.3.0`。
 - 安全边界：继续保持 dry-run only；没有 wallet、signer、transaction assembly、simulation、broadcast 或 live order submission path。
 - Release verification：169 tests passed，3 个需要独立 `TEST_DATABASE_URL` 的 PostgreSQL tests 按环境跳过；workspace typecheck、production build、LIVE browser smoke 与 PnL 汇总检查通过。
+
+## 2026-09-07 · SIDE-021 Historical backtest foundation
+
+- Recorder：LIVE 默认记录 canonical market events 与每秒 strategy observation tape；按 UTC hour/provider/model 分区，写入期使用 `.partial`，正常关闭后计算 SHA-256、原子 finalize 并产生 COMPLETE manifest。OPEN、FAILED、checksum/count/order 异常全部 fail closed。
+- Replay parity：新增固定 1 秒虚拟 timeline；每个 tick 先 ingest 已到达 events，再执行 signal freshness/prune 与 strategy observation。LIVE tape 保存真实 tick，旧 dataset/golden fixture 才从 canonical events 重建。
+- Backtest：新增单 dataset/单 `StrategyConfigV1` runner 与 HTTP API，输出确定性 result hash、basket/events/final snapshot、gross theoretical PnL、coverage、capital-normalized return、drawdown 和 exit reason counts。
+- 安全与口径：继续不含任何真实下单路径；第一版不模拟 fee、slippage、funding、market impact 或 partial fill，结果固定标记 `GROSS_THEORETICAL_V1`。
+- LIVE 验收：本地 recorder 对 Coinbase spot/derivatives、Kraken Futures、Hyperliquid 与 Bitquery 生成 COMPLETE dataset；选取含 13,541 events / 259 observations 的 dataset 通过 HTTP 跑通 recorded-tape backtest，coverage 100%，产生 1 个 closed + 1 个 open basket 与确定性 result ID。
+- 验证：176 tests passed，3 个需要独立 `TEST_DATABASE_URL` 的 PostgreSQL tests 按环境跳过；workspace typecheck、production build 与 `git diff --check` 全部通过。
+
+## 2026-09-07 · SIDE-021 Batch experiments 与 Backtest Lab
+
+- Batch runner：新增 explicit config batch 与 typed parameter grid，覆盖 entry、scale-in、exit、cooldown 参数；最多 128 个 unique variants。每个 experiment 只 prepare 一次 dataset，所有变体复用同一 immutable observation sequence。
+- Persistence：experiment index 与每个完整 variant result 分文件原子写入 `data/backtests/`；提供 queued/running/completed/partial/failed/cancelled 状态、取消、重启 history 恢复及 interrupted fail-closed 语义。
+- API/UI：新增 experiment list/create/detail/cancel/result endpoints；独立 `/backtest` 页面提供 completed dataset 概览、saved config/grid 两种输入、进度、leaderboard、Total Theoretical PnL、return/drawdown、equity curve、exit reasons 和 basket/fill drill-down。
+- 口径：leaderboard 默认按 gross Total Theoretical PnL 降序、同 PnL 以较低 max drawdown 优先；页面始终标识 DRY RUN MODEL / GROSS THEORETICAL，不引入真实下单能力。
+- 验证：typed grid、dedupe、single-prepare、artifact restore、HTTP async flow、ranking/chart helpers、responsive route contracts；183 tests passed、3 个 PostgreSQL integration tests 按环境跳过，workspace typecheck/build、`git diff --check` 与 LIVE browser smoke 通过。真实 5,869-event / 193-observation dataset 的 4 个 variants 全部完成且 coverage 100%。
+
+## 2026-09-08 · v0.4 freeze
+
+- Freeze scope：以 `v0.3.0` 为基线，纳入 SIDE-021 canonical event/observation recorder、checksum + fingerprint dataset finalization、fixed-tick replay fallback、deterministic backtest runner、batch experiments 与独立 `/backtest` lab。
+- Version：root、apps 与全部 workspace packages 统一升级为 `0.4.0`，release tag 使用 `v0.4.0`。
+- Scope boundary：Hyperliquid/CEX 认证交易、maker 预入场、真实 TP/SL 与任何 live execution 实现全部延后，不进入周五 demo 和 v0.4 release。
+- Safety boundary：继续保持 paper/dry-run only；没有认证交易 client、wallet、signer、transaction assembly、simulation、broadcast 或 live order submission path。
+- Release verification：183 tests passed，3 个需要独立 `TEST_DATABASE_URL` 的 PostgreSQL tests 按环境跳过；workspace typecheck、production build、`git diff --check` 与本地 HTTP + WebSocket + replay smoke 通过。

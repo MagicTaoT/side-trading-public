@@ -2,8 +2,8 @@
 
 > 工作定义：**See what the market is actually saying - and where it disagrees.**
 
-状态：v0.3 已冻结发布；SIDE-001 至 SIDE-005、SIDE-010、SIDE-011、SIDE-016、SIDE-020 complete；SIDE-006 local required gates complete / target AWS gate blocked；SIDE-007 至 SIDE-009 runtime adapters 已接入但 R1 完整退出门未完成；R0 REPLAY RUNNABLE；S0 产品版本 in execution
-日期：2026-09-07
+状态：v0.4 已冻结发布；SIDE-001 至 SIDE-005、SIDE-010、SIDE-011、SIDE-016、SIDE-020、SIDE-021 complete；SIDE-006 local required gates complete / target AWS gate blocked；SIDE-007 至 SIDE-009 runtime adapters 已接入但 R1 完整退出门未完成；R0 REPLAY RUNNABLE；S0 产品版本 in execution
+日期：2026-09-08
 目标市场：SOL only
 核心决策周期：未来 5 分钟（MVP 唯一窗口）
 

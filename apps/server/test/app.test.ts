@@ -368,9 +368,9 @@ describe("S0 runtime HTTP surface", () => {
     const active = (await app.inject({ method: "GET", url: "/api/paper-strategy-runs/active" })).json().run;
     expect(active).toMatchObject({
       status: "IDLE",
-      updatedAtMs: started.startedAtMs + 1_190,
+      updatedAtMs: started.startedAtMs + 2_000,
       snapshot: {
-        evaluatedAtMs: started.startedAtMs + 1_190,
+        evaluatedAtMs: started.startedAtMs + 2_000,
         eventSequence: 1
       }
     });

@@ -1,6 +1,6 @@
 {
   "name": "@side/server",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "start": "node dist/src/main.js",
     "smoke": "node --import tsx src/smoke.ts",
     "typecheck": "tsc -b --pretty false",
-    "test": "vitest run"
+    "test": "vitest run --exclude '**/dist/**'"
   },
   "dependencies": {
     "@fastify/websocket": "^11.2.0",

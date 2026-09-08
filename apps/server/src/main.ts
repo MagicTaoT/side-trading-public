@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { PartitionedEventRecorder } from "@side/recorder-replay";
 import { createApp } from "./app.js";
 import { loadDefaultReplayFixture } from "./fixture.js";
 import { discoverCoinbaseSlpProduct } from "./live/coordinator.js";
@@ -20,6 +21,15 @@ const bitqueryToken = process.env.BITQUERY_TOKEN;
 const zeroexApiKey = process.env.ZEROEX_API_KEY;
 const jupiterApiKey = process.env.JUPITER_API_KEY;
 const databaseUrl = process.env.DATABASE_URL;
+const recordingRootDir = resolve(invocationDirectory, process.env.SIDE_RECORDING_DIR ?? "data/recordings");
+const backtestResultRootDir = resolve(invocationDirectory, process.env.SIDE_BACKTEST_DIR ?? "data/backtests");
+const recordingDatasetId = process.env.SIDE_RECORDING_DATASET_ID;
+const eventRecorder = mode === "LIVE"
+  ? new PartitionedEventRecorder({
+      rootDir: recordingRootDir,
+      ...(recordingDatasetId ? { datasetId: recordingDatasetId } : {})
+    })
+  : undefined;
 const coinbasePerpProductId = mode === "LIVE"
   ? process.env.S0_COINBASE_PERP_PRODUCT ?? await discoverCoinbaseSlpProduct()
   : undefined;
@@ -32,6 +42,9 @@ const app = await createApp({
   cexProfile: mode === "LIVE" ? "coinbase" : "coinbase",
   journal: databaseUrl ? new PostgresDecisionJournal(databaseUrl) : new MemoryDecisionJournal(),
   strategyJournal: databaseUrl ? new PostgresStrategyJournal(databaseUrl) : new MemoryStrategyJournal(),
+  recordingRootDir,
+  backtestResultRootDir,
+  ...(eventRecorder ? { eventRecorder } : {}),
   ...(mode === "LIVE" && bitqueryToken && coinbasePerpProductId
     ? { live: { bitqueryToken, coinbasePerpProductId } }
     : {}),

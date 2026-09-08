@@ -13,18 +13,13 @@ import {
   VISUAL_BATCH_MS
 } from "./state.js";
 import {
-  decisionTone,
   entryEdge,
-  signedBps,
-  signedQuote,
-  unscoredReasons,
-  winRatePercent,
   type PaperAction,
   type PaperApiOrder,
-  type PaperPerformanceSummary,
   type PaperProvider
 } from "./performance.js";
 import { StrategyPage } from "./strategy/StrategyPage.js";
+import { BacktestPage } from "./backtest/BacktestPage.js";
 
 interface SourceState {
   provider: string;
@@ -161,7 +156,6 @@ type GatewayMessage =
   | { type: "source_health"; source: SourceState }
   | { type: "signal_state"; signal: SignalSnapshot }
   | { type: "flow_state"; flow: FlowWindowSnapshot }
-  | { type: "paper_markout"; markout: PaperApiOrder["markout"] }
   | { type: "resync_required"; snapshot: RuntimeSnapshot; suppressedCountByKind: Record<string, number> };
 
 const emptyPaperPreview: LegacyPaperPreview = {
@@ -528,10 +522,6 @@ function PowerRow({ market, flow5m, juries, events, sources, visualWindowMs }: P
   );
 }
 
-function requestKey(): string {
-  return crypto.randomUUID();
-}
-
 async function responseBody<T>(response: Response, field: string): Promise<T> {
   const body = await response.json() as Record<string, unknown>;
   if (!response.ok) {
@@ -541,134 +531,18 @@ async function responseBody<T>(response: Response, field: string): Promise<T> {
   return body[field] as T;
 }
 
-type JournalLoadState = "loading" | "ready" | "error";
-
-function referenceLabel(reference: PaperApiOrder["markout"]["entryReference"] | null): string {
-  if (!reference || reference.status !== "READY" || reference.priceQuotePerSol === null) return reference?.reason ?? "—";
-  return `$${Number(reference.priceQuotePerSol).toFixed(2)} · N${reference.sampleCount}`;
+function requestKey(): string {
+  return crypto.randomUUID();
 }
 
-function historyResult(order: PaperApiOrder, nowMs: number): string {
-  if (order.markout.status === "PENDING") {
-    return `DUE ${Math.max(0, Math.ceil((order.markout.dueAtMs - nowMs) / 1_000))}S`;
-  }
-  if (order.markout.status === "UNSCORED") return order.markout.reason ?? "UNSCORED";
-  return signedBps(order.markout.directionalMarkoutBps);
-}
-
-interface ShadowPerformanceProps {
-  mode: "LIVE" | "REPLAY";
-  summary: PaperPerformanceSummary | null;
-  orders: PaperApiOrder[];
-  state: JournalLoadState;
-  error: string | null;
-  nowMs: number;
-  onRefresh: () => void;
-  onDelete: (orderId: string) => Promise<void>;
-}
-
-function ShadowPerformance({ mode, summary, orders, state, error, nowMs, onRefresh, onDelete }: ShadowPerformanceProps) {
-  const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
-  const [deletePending, setDeletePending] = useState<string | null>(null);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
-  const winRate = summary ? winRatePercent(summary) : null;
-  const reasons = summary ? unscoredReasons(summary) : [];
-  const total = summary ? summary.buyCount + summary.sellCount + summary.waitCount : 0;
-  const persistence = orders[0]?.persistence === "postgres-side-011" || (mode === "LIVE" && orders.length === 0)
-    ? "POSTGRES DURABLE"
-    : "SESSION JOURNAL";
-
-  useEffect(() => {
-    if (!deleteCandidate) return;
-    const timer = window.setTimeout(() => setDeleteCandidate(null), 5_000);
-    return () => window.clearTimeout(timer);
-  }, [deleteCandidate]);
-
-  const requestDelete = async (orderId: string) => {
-    if (deleteCandidate !== orderId) {
-      setDeleteCandidate(orderId);
-      setDeleteError(null);
-      return;
-    }
-    setDeletePending(orderId);
-    try {
-      await onDelete(orderId);
-      setDeleteCandidate(null);
-      setDeleteError(null);
-    } catch (reason) {
-      setDeleteError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setDeletePending(null);
-    }
-  };
-
-  return (
-    <section className="shadow-panel" aria-label="Shadow performance and paper decision history" aria-busy={state === "loading"}>
-      <div className="shadow-heading">
-        <div><span className="kicker">DECISION JOURNAL · +5M</span><h2>SHADOW PERFORMANCE</h2></div>
-        <div className="shadow-heading-actions"><span className={`journal-state ${state}`}><i />{state === "loading" ? "SYNCING" : state === "error" ? "JOURNAL ERROR" : persistence}</span><button className="quiet-button" type="button" onClick={onRefresh}>REFRESH</button></div>
-      </div>
-
-      {error ? <p className="shadow-error" role="alert">{error} · persisted decisions remain authoritative.</p> : null}
-      {deleteError ? <p className="shadow-error" role="alert">DELETE FAILED · {deleteError}</p> : null}
-
-      <div className="shadow-metrics" aria-live="polite">
-        <div><span>DECISIONS</span><strong>{summary ? total : "—"}</strong><small>{summary ? `B ${summary.buyCount} · S ${summary.sellCount} · W ${summary.waitCount}` : "LOADING"}</small></div>
-        <div><span>SCORED SAMPLE</span><strong>{summary?.scoredCount ?? "—"}</strong><small>BUY / SELL ONLY</small></div>
-        <div><span>WIN RATE</span><strong>{winRate === null ? "—" : `${winRate.toFixed(1)}%`}</strong><small>{summary ? `${summary.winCount} POSITIVE` : "LOADING"}</small></div>
-        <div><span>MEAN +5M</span><strong className={summary?.meanDirectionalMarkoutBps === null || summary?.meanDirectionalMarkoutBps === undefined ? "" : Number(summary.meanDirectionalMarkoutBps) >= 0 ? "positive" : "negative"}>{summary ? signedBps(summary.meanDirectionalMarkoutBps) : "—"}</strong><small>DIRECTIONAL · GROSS</small></div>
-        <div><span>PENDING</span><strong>{summary?.pendingCount ?? "—"}</strong><small>WORKER QUEUE</small></div>
-        <div><span>UNSCORED</span><strong>{summary?.unscoredCount ?? "—"}</strong><small>EXCLUDED FROM WIN RATE</small></div>
-      </div>
-
-      <div className="unscored-strip">
-        <span>UNSCORED REASONS</span>
-        <div>{reasons.length === 0 ? <strong>NONE RECORDED</strong> : reasons.map(({ reason, count }) => <strong key={reason}>{reason.replaceAll("_", " ")} ×{count}</strong>)}</div>
-      </div>
-
-      <div className="decision-history">
-        <div className="decision-history-heading"><strong>RECENT DECISIONS</strong><span>{orders.length} LOADED · WAIT/UNSCORED NEVER ENTER WIN RATE</span></div>
-        <div className="decision-columns" aria-hidden="true"><span>TIME</span><span>ACTION</span><span>PROVIDER</span><span>ENTRY EDGE</span><span>ENTRY / FUTURE</span><span>+5M RESULT</span><span>PAPER PNL</span><span>DELETE</span></div>
-        {orders.length === 0 && state !== "loading" ? <p className="decision-empty">No paper decisions recorded yet.</p> : null}
-        {orders.map((order) => {
-          const tone = decisionTone(order);
-          const edge = entryEdge(order);
-          return (
-            <article className={`decision-row ${tone}`} key={order.orderId} aria-label={`${order.action} decision ${order.orderId}`}>
-              <time dateTime={new Date(order.recordedAtMs).toISOString()}>{new Date(order.recordedAtMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
-              <strong className={`decision-action ${order.action.toLowerCase()}`}>{order.action}</strong>
-              <span>{order.provider?.toUpperCase() ?? "NO QUOTE"}</span>
-              <strong className={`entry-edge ${edge.tone}`} title="Market verdict persisted when this decision was recorded">{edge.label}</strong>
-              <span className="reference-pair"><b>{referenceLabel(order.markout.entryReference)}</b><i>→</i><b>{referenceLabel(order.markout.futureReference)}</b></span>
-              <strong className="decision-result">{historyResult(order, nowMs)}</strong>
-              <strong className="decision-pnl">{order.markout.status === "SCORED" ? signedQuote(order.markout.directionalPnlQuote) : "—"}</strong>
-              <button
-                className={`decision-delete ${deleteCandidate === order.orderId ? "confirm" : ""}`}
-                type="button"
-                disabled={deletePending !== null}
-                aria-label={`${deleteCandidate === order.orderId ? "Confirm delete" : "Delete"} decision ${order.orderId}`}
-                onClick={() => void requestDelete(order.orderId)}
-              >
-                {deletePending === order.orderId ? "DELETING" : deleteCandidate === order.orderId ? "CONFIRM" : "DELETE"}
-              </button>
-            </article>
-          );
-        })}
-      </div>
-      <p className="shadow-method">Win rate = positive scored BUY/SELL ÷ all scored BUY/SELL. WAIT, missing reference, source gap and outlier outcomes remain visible but are excluded. Results are gross directional markouts, not executable P&amp;L.</p>
-    </section>
-  );
-}
-
-interface PaperPriceButtonProps {
+interface PaperPriceTileProps {
   side: "BUY" | "SELL";
   price: PaperDisplayPrice | null;
   loading: boolean;
   nowMs: number;
-  onClick: () => void;
 }
 
-function PaperPriceButton({ side, price, loading, nowMs, onClick }: PaperPriceButtonProps) {
+function PaperPriceTile({ side, price, loading, nowMs }: PaperPriceTileProps) {
   const ageMs = price?.observedAtMs === null || price?.observedAtMs === undefined
     ? null
     : Math.max(0, nowMs - price.observedAtMs);
@@ -684,14 +558,14 @@ function PaperPriceButton({ side, price, loading, nowMs, onClick }: PaperPriceBu
           : `0x ${price.status} · ${age ?? "—"}`;
   const title = price?.status === "DRY"
     ? `${price.source === "coinbase-dry" ? "Coinbase SOL-USD reference (USD/USDC basis not modeled)" : "Bitquery WSOL/USDC reference"} with a fixed 50 bps dry assumption. Display only; not executable or recordable.`
-    : "Five-second display estimate. Clicking requests a separate action-time quote before recording.";
+    : "Five-second display estimate. Display only.";
 
   return (
-    <button type="button" className={`${side === "BUY" ? "buy-action" : "sell-action"} paper-price-action`} onClick={onClick} title={title}>
+    <div className={`${side === "BUY" ? "buy-action" : "sell-action"} paper-price-action`} title={title} aria-label={`${side} paper reference price`}>
       <span>PAPER {side}</span>
       <strong>{price?.priceQuotePerSol ? `${money(Number(price.priceQuotePerSol))}` : "—"}</strong>
       <small>{loading ? "UPDATING · " : ""}{source}</small>
-    </button>
+    </div>
   );
 }
 
@@ -859,12 +733,6 @@ function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [motionPaused, setMotionPaused] = useState(false);
   const [pageHidden, setPageHidden] = useState(false);
-  const [paperAction, setPaperAction] = useState<PaperAction | null>(null);
-  const [paperOrders, setPaperOrders] = useState<PaperApiOrder[]>([]);
-  const [performance, setPerformance] = useState<PaperPerformanceSummary | null>(null);
-  const [journalState, setJournalState] = useState<JournalLoadState>("loading");
-  const [journalError, setJournalError] = useState<string | null>(null);
-  const [journalClockMs, setJournalClockMs] = useState(Date.now());
   const [paperPrices, setPaperPrices] = useState<PaperPriceBoardSnapshot | null>(null);
   const [paperPricesLoading, setPaperPricesLoading] = useState(true);
   const [paperPriceClockMs, setPaperPriceClockMs] = useState(Date.now());
@@ -881,28 +749,6 @@ function DashboardPage() {
     setSnapshot((await response.json()) as RuntimeSnapshot);
   }, []);
 
-  const loadJournal = useCallback(async () => {
-    setJournalState((current) => current === "ready" ? "ready" : "loading");
-    try {
-      const [ordersResponse, performanceResponse] = await Promise.all([
-        fetch("/api/paper-orders?limit=12"),
-        fetch("/api/shadow-performance")
-      ]);
-      const [orders, nextPerformance] = await Promise.all([
-        responseBody<PaperApiOrder[]>(ordersResponse, "orders"),
-        responseBody<PaperPerformanceSummary>(performanceResponse, "performance")
-      ]);
-      setPaperOrders(orders);
-      setPerformance(nextPerformance);
-      setJournalClockMs(Date.now());
-      setJournalError(null);
-      setJournalState("ready");
-    } catch (reason) {
-      setJournalError(reason instanceof Error ? reason.message : String(reason));
-      setJournalState("error");
-    }
-  }, []);
-
   const loadPaperPrices = useCallback(async () => {
     setPaperPricesLoading(true);
     try {
@@ -916,33 +762,11 @@ function DashboardPage() {
     }
   }, []);
 
-  const handleRecorded = useCallback((order: PaperApiOrder) => {
-    setPaperOrders((current) => [order, ...current.filter(({ orderId }) => orderId !== order.orderId)].slice(0, 12));
-    setJournalClockMs(Date.now());
-    void loadJournal();
-  }, [loadJournal]);
-
-  const deletePaperOrder = useCallback(async (orderId: string) => {
-    const response = await fetch(`/api/paper-orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });
-    await responseBody<string>(response, "orderId");
-    setPaperOrders((current) => current.filter((order) => order.orderId !== orderId));
-    await loadJournal();
-  }, [loadJournal]);
-
   useEffect(() => {
     setWindowSwitching(true);
     const timer = window.setTimeout(() => setWindowSwitching(false), 850);
     return () => window.clearTimeout(timer);
   }, [visualWindowMs]);
-
-  useEffect(() => {
-    void loadJournal();
-    const timer = window.setInterval(() => {
-      setJournalClockMs(Date.now());
-      void loadJournal();
-    }, 5_000);
-    return () => window.clearInterval(timer);
-  }, [loadJournal]);
 
   useEffect(() => {
     void loadPaperPrices();
@@ -1011,10 +835,6 @@ function DashboardPage() {
         else if (message.type === "source_health") setSnapshot((current) => ({ ...current, sources: upsertSource(current.sources, message.source) }));
         else if (message.type === "signal_state") setSnapshot((current) => ({ ...current, signal: message.signal }));
         else if (message.type === "flow_state") setSnapshot((current) => ({ ...current, flow5m: message.flow }));
-        else if (message.type === "paper_markout") {
-          setPaperOrders((current) => current.map((order) => order.orderId === message.markout.decisionId ? { ...order, markout: message.markout } : order));
-          void loadJournal();
-        }
       } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     });
     return () => {
@@ -1023,7 +843,7 @@ function DashboardPage() {
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
       socket.close();
     };
-  }, [loadJournal, loadSnapshot, websocketGeneration, websocketsEnabled]);
+  }, [loadSnapshot, websocketGeneration, websocketsEnabled]);
 
   useEffect(() => {
     const handleVisibility = () => {
@@ -1031,20 +851,12 @@ function DashboardPage() {
       setPageHidden(hidden);
       if (!hidden) {
         void loadSnapshot().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
-        void loadJournal();
         void loadPaperPrices();
       }
     };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, [loadJournal, loadPaperPrices, loadSnapshot]);
-
-  useEffect(() => {
-    if (paperAction === null) return;
-    const handleKey = (event: KeyboardEvent) => { if (event.key === "Escape") setPaperAction(null); };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [paperAction]);
+  }, [loadPaperPrices, loadSnapshot]);
 
   const setReplay = useCallback(async (action: "start" | "stop") => {
     setError(null);
@@ -1106,6 +918,7 @@ function DashboardPage() {
         <div className="brand-block"><strong className="brand">SIDE</strong><span className="instrument">SOL / USD</span><span className="window-label">30S EDGE · {visualWindowLabel(visualWindowMs)} BUBBLES</span></div>
         <div className="status-strip" aria-label="Runtime status">
           <a className="page-nav-link" href="/strategy">AUTO STRATEGY</a>
+          <a className="page-nav-link" href="/backtest">BACKTEST</a>
           <div className="visual-window-control" role="group" aria-label="Bubble display window">
             <span>BUBBLES</span>
             {visualWindowOptions.map(({ label, value }) => <button type="button" key={value} aria-pressed={visualWindowMs === value} onClick={() => { if (value !== visualWindowMs) { setWindowSwitching(true); setVisualWindowMs(value); } }}>{label}</button>)}
@@ -1130,7 +943,7 @@ function DashboardPage() {
           <PowerRow market="spot" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} visualWindowMs={visualWindowMs} />
           <article className={`verdict-card ${verdictClass(verdict.verdict)}`} aria-label="Market verdict">
             <div className="verdict-side-action buy">
-              <PaperPriceButton side="BUY" price={paperPrices?.buy ?? null} loading={paperPricesLoading} nowMs={paperPriceClockMs} onClick={() => setPaperAction("BUY")} />
+              <PaperPriceTile side="BUY" price={paperPrices?.buy ?? null} loading={paperPricesLoading} nowMs={paperPriceClockMs} />
             </div>
             <div className="verdict-main">
               <div className="verdict-summary">
@@ -1142,12 +955,11 @@ function DashboardPage() {
                 <p>{narrative(snapshot.signal)}</p>
                 <div className="verdict-context-bottom">
                   <div className="leader-row"><span>FIRST OBSERVED BY SIDE</span><strong>{leading}</strong></div>
-                  <button type="button" className="wait-action" onClick={() => setPaperAction("WAIT")}>RECORD WAIT</button>
                 </div>
               </div>
             </div>
             <div className="verdict-side-action sell">
-              <PaperPriceButton side="SELL" price={paperPrices?.sell ?? null} loading={paperPricesLoading} nowMs={paperPriceClockMs} onClick={() => setPaperAction("SELL")} />
+              <PaperPriceTile side="SELL" price={paperPrices?.sell ?? null} loading={paperPricesLoading} nowMs={paperPriceClockMs} />
             </div>
           </article>
           <PowerRow market="perp" flow5m={snapshot.flow5m} juries={snapshot.signal.juries} events={bubbleBatches} sources={snapshot.sources} visualWindowMs={visualWindowMs} />
@@ -1175,17 +987,6 @@ function DashboardPage() {
         </div>
       </section>
 
-      <ShadowPerformance
-        mode={snapshot.mode}
-        summary={performance}
-        orders={paperOrders}
-        state={journalState}
-        error={journalError}
-        nowMs={journalClockMs}
-        onRefresh={() => void loadJournal()}
-        onDelete={deletePaperOrder}
-      />
-
       <section className="source-coverage" aria-label="Source coverage">
         <div><span className="kicker">SOURCE / PROFILE</span><h2>LIMITED S0 COVERAGE</h2></div>
         <div className="source-pills">{snapshot.sources.length === 0 ? <span className="source-pill waiting"><i />NO SOURCES OBSERVED</span> : null}{snapshot.sources.map((source) => <span className={`source-pill ${source.quality}`} key={source.provider}><i />{source.provider.toUpperCase()} · {source.quality.toUpperCase()} · {source.eventCount}</span>)}</div>
@@ -1210,12 +1011,13 @@ function DashboardPage() {
           >{websocketAction === "reconnect" ? "RECONNECTING…" : "RECONNECT ALL WS"}</button>
         </div>
       </footer>
-      {paperAction ? <PaperDrawer action={paperAction} mode={snapshot.mode} freshJuryCount={verdict.freshJuryCount} onClose={() => setPaperAction(null)} onRecorded={handleRecorded} /> : null}
     </main>
   );
 }
 
 export function App() {
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
-  return path === "/strategy" ? <StrategyPage /> : <DashboardPage />;
+  if (path === "/strategy") return <StrategyPage />;
+  if (path === "/backtest") return <BacktestPage />;
+  return <DashboardPage />;
 }

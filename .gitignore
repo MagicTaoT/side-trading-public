@@ -5,6 +5,8 @@ coverage/
 .DS_Store
 *.log
 packages/source-preflight/reports/
+data/recordings/
+data/backtests/
 .env.preflight.local
 .env.live.local
 

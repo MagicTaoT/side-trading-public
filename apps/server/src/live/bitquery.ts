@@ -5,10 +5,11 @@ import { PersistentSocket } from "./socket.js";
 
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+export const BITQUERY_MIN_USDC_NOTIONAL = "100";
 const SPEC: LiveSourceSpec = { provider: "bitquery", venue: "solana-dex", segment: "dex-spot", instrumentId: "WSOL-USDC", quote: "USDC" };
-const SUBSCRIPTION = `subscription SideLive {
+export const BITQUERY_SUBSCRIPTION = `subscription SideLive {
   Solana {
-    DEXTradeByTokens(where: {Transaction: {Result: {Success: true}}, Trade: {Currency: {MintAddress: {is: "${WSOL_MINT}"}}, Side: {Currency: {MintAddress: {is: "${USDC_MINT}"}}}}}) {
+    DEXTradeByTokens(where: {Transaction: {Result: {Success: true}}, Trade: {Currency: {MintAddress: {is: "${WSOL_MINT}"}}, Side: {Amount: {ge: "${BITQUERY_MIN_USDC_NOTIONAL}"}, Currency: {MintAddress: {is: "${USDC_MINT}"}}}}}) {
       Block { Time Slot }
       Transaction { Signature Index Result { Success } }
       Trade { Index Market { MarketAddress } Dex { ProtocolFamily ProtocolName ProgramAddress } Price Amount Side { Type Amount Currency { MintAddress Symbol } } }
@@ -43,7 +44,7 @@ export class BitqueryLiveAdapter {
     const message = record(JSON.parse(raw));
     if (!message) return;
     if (message.type === "connection_ack") {
-      socket.send(JSON.stringify({ id: "side-live-wsol-usdc", type: "subscribe", payload: { query: SUBSCRIPTION } }));
+      socket.send(JSON.stringify({ id: "side-live-wsol-usdc", type: "subscribe", payload: { query: BITQUERY_SUBSCRIPTION } }));
       this.sink.emit(healthDraft(SPEC, "live", generation));
       return;
     }
@@ -195,7 +196,7 @@ export class BitqueryLiveAdapter {
         blockTimeMs: occurredAtMs,
         parserVersion: "bitquery-dex-trade-economic-group-v1",
         parseQuality: { protocolDecoded: protocol !== "unknown-solana-dex", tokenBalancesReconciled: false, providerParsed: true, nativeSolAccounting: "not-applicable" },
-        coverageGroup: "bitquery:wsol-usdc:all-dex"
+        coverageGroup: `bitquery:wsol-usdc:all-dex:min-${BITQUERY_MIN_USDC_NOTIONAL}-usdc-leg`
       }
     });
   }
