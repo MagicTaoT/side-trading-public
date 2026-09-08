@@ -158,3 +158,46 @@
 - Scope boundary：Hyperliquid/CEX 认证交易、maker 预入场、真实 TP/SL 与任何 live execution 实现全部延后，不进入周五 demo 和 v0.4 release。
 - Safety boundary：继续保持 paper/dry-run only；没有认证交易 client、wallet、signer、transaction assembly、simulation、broadcast 或 live order submission path。
 - Release verification：183 tests passed，3 个需要独立 `TEST_DATABASE_URL` 的 PostgreSQL tests 按环境跳过；workspace typecheck、production build、`git diff --check` 与本地 HTTP + WebSocket + replay smoke 通过。
+
+## 2026-09-08 · SIDE-022 historical recovery 与 3h lifecycle
+
+- Historical recovery：在不启动 writer、确认没有服务进程占用文件后，扫描两份 v0.4 OPEN/partial recordings；按 UTC 3 小时窗口恢复 47,434 条 one-second strategy observations，生成 5 个 `recovered-tape-*` COMPLETE datasets、5 个 tar.gz、独立 SHA-256 metadata 与 recovery report。原始约 1.9 GB dataset/files 未修改、未删除。
+- Recovery truthfulness：前四个窗口覆盖完整 3 小时，第五个是 15:00Z 至采集停止时的 partial duration；03:00–06:00Z 中真实约 22 分钟 source-process gap 原样保留，不插值。恢复包是 observation-tape research package；canonical raw events 继续留在原 source datasets。
+- Rotation/archive：LIVE recorder 改为 UTC-aligned 3h segments；同一有界串行队列完成 previous finalize/next accept，WebSocket 不重连。每个 COMPLETE segment 自动生成 gzip tar 与 SHA-256；EC2 dataset/archive 都不自动删除。
+- Manual lifecycle：`/backtest` 新增 package size/hash、download 与 DELETE→CONFIRM DELETE；服务端还要求 exact confirmation header，并拒绝 active、非 COMPLETE 或被 composite 引用的 dataset。新增 archive import CLI 和旧 partial recovery CLI。
+- Long backtest：新增严格连续性检查的 3h/6h/12h/24h/3d virtual composite，不复制 observations；缺段、首尾覆盖不足、>5s gap 或 constituent hash 不符均 fail closed。AWS 与本机没有不同 batch policy。
+- Stop：UI 明确命名 `STOP BACKTEST`；取消会保留当前原子 variant，阻止后续 variants，并保留已完成结果。
+- Real-data check：06:00–09:00Z recovered package 含 10,751 observations，运行两次得到相同 `backtest:f53b3bbd259e5a49ae8e286d`，28 baskets、coverage 100%，两次总耗时约 287 ms。
+- Verification：188 tests passed，3 个需要独立 PostgreSQL database 的 integration tests 按环境跳过；全仓 typecheck、production build 与 `git diff --check` 通过。
+
+## 2026-09-08 · SIDE-023 simple admin passcode 与 duration expansion
+
+- Duration：组合回测时长从 24h/7d 调整为用户指定的 3h/6h/12h/24h/3d；全部继续使用相同的 5 秒最大 gap 与完整首尾覆盖门。
+- Passcode：使用 OpenSSL CSPRNG 生成 256-bit random passcode，写入 Git 忽略且 `0600` 的 `.env.admin.local`；secret value 未输出到日志、源码或 tracked files。
+- Guard：以 `x-side-admin-passcode` + constant-time digest comparison 保护 archive download、全部 delete 和所有 state-changing API，包括 composite/backtest、replay、WebSocket resource control、paper record 与 dry strategy control。配置值短于 24 字符时 fail-fast。
+- UI：Backtest Lab 新增 password input；验证后仅写当前 tab sessionStorage，页面间导航复用，关闭 tab 清除。
+- Verification：191 tests passed，3 个 PostgreSQL integration tests 按环境跳过；全仓 typecheck、production build 与 `git diff --check` 通过。
+
+## 2026-09-08 · SIDE-024 AWS deployment preparation
+
+- 新增 ARM64 Docker multi-stage build、PostgreSQL 18 + SIDE server + Caddy static web Compose、same-origin API/WebSocket proxy、healthcheck、日志轮转、resource ceiling 与 60 秒 recorder graceful shutdown。
+- 共机边界：默认只绑定宿主机 `127.0.0.1:8088`，不抢占 existing service 既有 80/443；server 与 database 不映射 host port。secret 从 repository 外 `/etc/side/side.env` 注入，Docker build context 排除本地 env、data、reports 与 Git metadata。
+- 运维：新增幂等 host directory preparation、ARM/RAM/disk/Docker/NTP/secret/port preflight 和部署 runbook；原始 recorder 与 archive 继续遵循人工下载、人工删除策略。
+- Blocker：既定 AWS `192.0.2.10:22` 再次连接超时，尚未运行目标 region source strict gate，也未确认 existing service reverse proxy、实际资源和 DNS/TLS。
+- Container verification：本机实际构建 linux/arm64 Node 24 server（约 101 MB）与非 root Caddy web（约 39 MB），build context 约 821 KB，确认 data/local env 未进入镜像。隔离 Compose smoke 中 PostgreSQL/server/web 全部 healthy，journal migrations、SPA fallback、same-origin health/API、401/200 admin guard、WebSocket upgrade、安全 headers 与 secret-log scan 通过。
+- Smoke 修复：实际启动发现并修复 bind data owner gate、Caddy file capability 与 drop-all 冲突、以及 SPA `try_files` 抢先改写 API route 的问题。Colima 会把本机 bind mount 显示为 root:755，因此本地 topology smoke 临时以 root override；AWS production 仍固定非 root UID/GID，并由 host preflight 校验目录 owner。
+- Workspace verification：191 tests passed，3 个 PostgreSQL integration tests 按环境跳过；typecheck、production build、Compose config、shell syntax 与 `git diff --check` 全部通过。
+
+## 2026-09-08 · v0.5 freeze 与 AWS release
+
+- Version：root、apps 与全部 workspace packages 统一升级为 `0.5.0`；release tag 使用 `v0.5.0`。
+- Local handoff：先卸载 `com.side.web` 与 `com.side.server` launchd jobs，确认 5173/3001 释放；共享 Homebrew PostgreSQL 保留，避免影响其他本地项目。
+- Host correction：AWS Console 确认 `side-host` 正确 Elastic IP 为 `192.0.2.20`；实例 `t4g.medium` / ARM64，3/3 checks passed，原记录 `192.0.2.10` 已失效。
+- Storage：encrypted gp3 从 30 GiB 扩为用户指定的 60 GiB，在线扩展 root partition/ext4；部署后约 47 GiB free，以 45 GiB host gate 启动并继续人工 retention。
+- Secret boundary：Bitquery、0x、Jupiter 与 SIDE admin passcode 经用户明确授权后通过 SSH 写入 `/etc/side/side.env`；文件 `0600`，数据库密码在 EC2 内独立生成，所有值均未进入 Git、Docker build 或工具输出。
+- Deployment fixes：实机预检修复 `/etc/side` operator ownership；PostgreSQL 18 首启修复 bind root 为镜像 `999:999`，并把两项修复写回 `prepare-host.sh`/runbook。
+- Source gate：Coinbase spot/perp、Hyperliquid、Bitquery 与 0x required strict gate 通过；Binance 受 us-east-1 HTTP 451 限制；Jupiter 规范化 key 后仍为 401，明确保持 degraded。
+- Runtime：PostgreSQL/server/web 全部 healthy，journal 9 tables，admin verify 401/200，所有 runtime sources LIVE/FRESH；recorder 持续写入 provider NDJSON 与一秒 observations。
+- Public route：既有 existing service Caddy 配置先离线 validate、备份再热 reload，仅新增 `side.example.com -> http://127.0.0.1:8088`；existing service 与 SIDE HTTPS 均返回 200。
+- Capacity：10 秒采样中整机约 49–70% CPU idle；SIDE server 约 0.8–1.0 vCPU / 160 MiB RAM，三 SIDE 容器合计约 221 MiB RAM。可支持当前 S0，但不视为长期 soak 或 HA 证明。
+- Release verification：191 tests passed，3 skipped；workspace typecheck/build、Compose config、shell syntax、`git diff --check`、exact-value secret scan、target ARM64 build、source preflight 与 browser smoke 全部通过。

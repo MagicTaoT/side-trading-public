@@ -1,0 +1,46 @@
+{
+	admin off
+	auto_https off
+}
+
+http://:8080 {
+	encode zstd gzip
+
+	# Protect pages, read APIs and WebSocket upgrades as well as mutations.
+	@private not path /health/live
+	basic_auth @private {
+		side {$SIDE_ACCESS_PASSWORD_HASH}
+	}
+
+	@foreign_origin expression `{http.request.header.Origin} != "" && {http.request.header.Origin} != "https://" + {http.request.hostport}`
+	handle @foreign_origin {
+		respond "Forbidden" 403
+	}
+
+	request_body {
+		max_size 10MB
+	}
+
+	@side_backend path /api/* /health/* /ws
+	handle @side_backend {
+		reverse_proxy side-server:3001
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	@immutable path /assets/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+	header {
+		-Server
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+}

@@ -6,9 +6,12 @@ coverage/
 *.log
 packages/source-preflight/reports/
 data/recordings/
+data/recording-archives/
 data/backtests/
 .env.preflight.local
 .env.live.local
+.env.admin.local
+deploy/aws/side.env
 
 .env
 .env.*

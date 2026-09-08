@@ -1,0 +1,132 @@
+name: side-trading
+
+services:
+  side-postgres:
+    image: postgres:18.6-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-side}
+      POSTGRES_USER: ${POSTGRES_USER:-side}
+      POSTGRES_PASSWORD: ${SIDE_DB_PASSWORD:?set SIDE_DB_PASSWORD in deploy/aws/side.env}
+      POSTGRES_INITDB_ARGS: --data-checksums
+    command:
+      - postgres
+      - -c
+      - max_connections=30
+      - -c
+      - shared_buffers=128MB
+    volumes:
+      - type: bind
+        source: ${SIDE_POSTGRES_ROOT:-/srv/side/postgres}
+        target: /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    shm_size: 128mb
+    mem_limit: 768m
+    mem_reservation: 256m
+    cpus: 0.50
+    pids_limit: 160
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  side-server:
+    build:
+      context: ../..
+      dockerfile: deploy/aws/Dockerfile
+      target: side-server
+    image: side-trading/server:${SIDE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    init: true
+    user: "${SIDE_RUNTIME_UID:-1000}:${SIDE_RUNTIME_GID:-1000}"
+    stop_grace_period: 60s
+    environment:
+      S0_RUNTIME_MODE: LIVE
+      DATABASE_URL: postgresql://${POSTGRES_USER:-side}:${SIDE_DB_PASSWORD}@side-postgres:5432/${POSTGRES_DB:-side}
+      BITQUERY_TOKEN: ${BITQUERY_TOKEN:?set BITQUERY_TOKEN in /etc/side/side.env}
+      ZEROEX_API_KEY: ${ZEROEX_API_KEY:?set ZEROEX_API_KEY in /etc/side/side.env}
+      SIDE_ADMIN_PASSCODE: ${SIDE_ADMIN_PASSCODE:?set SIDE_ADMIN_PASSCODE in /etc/side/side.env}
+      JUPITER_API_KEY: ${JUPITER_API_KEY:-}
+      HOST: 0.0.0.0
+      PORT: "3001"
+      INIT_CWD: /app
+      NODE_OPTIONS: --max-old-space-size=${SIDE_NODE_MAX_OLD_SPACE_MB:-1024}
+      SIDE_RECORDING_DIR: /app/data/recordings
+      SIDE_RECORDING_ARCHIVE_DIR: /app/data/recording-archives
+      SIDE_BACKTEST_DIR: /app/data/backtests
+      SIDE_RECORDING_SEGMENT_MS: "10800000"
+    volumes:
+      - type: bind
+        source: ${SIDE_DATA_ROOT:-/srv/side/data}
+        target: /app/data
+    depends_on:
+      side-postgres:
+        condition: service_healthy
+    expose:
+      - "3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1536m
+    mem_reservation: 384m
+    cpus: 1.25
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "5"
+
+  side-web:
+    build:
+      context: ../..
+      dockerfile: deploy/aws/Dockerfile
+      target: side-web
+    image: side-trading/web:${SIDE_IMAGE_TAG:-local}
+    environment:
+      SIDE_ACCESS_PASSWORD_HASH: ${SIDE_ACCESS_PASSWORD_HASH:?set bcrypt hash for private web access}
+    restart: unless-stopped
+    init: true
+    depends_on:
+      side-server:
+        condition: service_healthy
+    ports:
+      - "${SIDE_HTTP_BIND:-127.0.0.1:8088}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    read_only: true
+    tmpfs:
+      - /config:size=8m,mode=0700,uid=10001,gid=10001
+      - /data:size=8m,mode=0700,uid=10001,gid=10001
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    mem_reservation: 32m
+    cpus: 0.25
+    pids_limit: 80
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "3"

@@ -2,7 +2,7 @@
 
 > 工作定义：**See what the market is actually saying - and where it disagrees.**
 
-状态：v0.4 已冻结发布；SIDE-001 至 SIDE-005、SIDE-010、SIDE-011、SIDE-016、SIDE-020、SIDE-021 complete；SIDE-006 local required gates complete / target AWS gate blocked；SIDE-007 至 SIDE-009 runtime adapters 已接入但 R1 完整退出门未完成；R0 REPLAY RUNNABLE；S0 产品版本 in execution
+状态：v0.4 已冻结发布；SIDE-001 至 SIDE-005、SIDE-010、SIDE-011、SIDE-016、SIDE-020、SIDE-021、SIDE-022、SIDE-023 complete；SIDE-024 local deployment package implemented / target host blocked；SIDE-006 local required gates complete / target AWS gate blocked；SIDE-007 至 SIDE-009 runtime adapters 已接入但 R1 完整退出门未完成；R0 REPLAY RUNNABLE；S0 产品版本 in execution
 日期：2026-09-08
 目标市场：SOL only
 核心决策周期：未来 5 分钟（MVP 唯一窗口）
@@ -349,7 +349,7 @@ signal_model_version
 - WAIT 单独统计“避免进入了无优势区间”的结果，不伪装成 BUY/SELL 胜率；
 - 自动 signal transition 也进入 shadow log，避免只挑用户点击的样本。
 
-S0 的存储边界也跟随唯一 5 分钟窗口：运行时只保留当前 5 分钟 rolling state；长期保存 decision snapshot、+5m markout、健康转移和用户明确开启的 golden replay recording。普通原始行情不在 S0 无限落盘。M0 如需研究/回放，再配置短期、可轮转的 compressed event retention，并明确容量与删除策略。
+SIDE-022 已在 v0.4 之后打开持续研究录制：LIVE canonical events 与每秒 observation tape 按 UTC 3 小时窗口轮转并归档。当前 operator policy 是同时保留 EC2 dataset 与 `tar.gz`，不做 S3、不设自动 TTL；用户下载并校验后再显式二次确认删除。因此部署必须提供磁盘用量告警，磁盘接近阈值时停止 recorder 或由 operator 清理，不能依赖自动删除。运行时 jury/flow rolling state 仍只保留当前 5 分钟。
 
 ### 7.3 “好输出”的定义
 

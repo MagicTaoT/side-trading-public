@@ -839,6 +839,8 @@ data/events/2026-09-04/13/bitquery-solana-dex.ndjson.zst
 
 SIDE-021 起，LIVE 默认持续记录通过 schema/dedupe/ordering gate 的 canonical event，并同时记录与 LIVE 策略评估完全相同的每秒 observation tape。首版按 UTC hour/provider 写 `.ndjson.partial`，正常关闭时计算 SHA-256、改名为 `.ndjson` 并将 dataset manifest 标记为 `COMPLETE`；OPEN/FAILED dataset 不允许进入 backtest。后续容量升级仍使用 NDJSON.zst/Parquet rotation。每条 event 保留 `ingestSeq` 和 schema version；manifest 保存首尾 sequence、record count、provider/model coverage、partition checksum 与 dataset fingerprint。异步串行 writer 不阻塞 adapter callback；任何写入错误会把 recorder 标记为 FAILED，而不是把不完整数据包装成可回测数据集。
 
+SIDE-022 将 recorder lifecycle 固定为 UTC 对齐的 3 小时 segment。轮转在同一串行队列内 finalize 前一 segment 并切换后一个，行情 sockets 不重启；COMPLETE dataset 自动打成带独立 SHA-256 metadata 的 gzip tar。服务器 dataset 与 archive 都不自动删除，operator 从 `/backtest` 下载并验证后显式二次确认删除。3h/6h/12h/24h/3d backtest 通过 composite manifest 引用多个 immutable segments，不复制 partitions；首尾或中间 observation gap 超过 5 秒即拒绝构建，不能通过填充伪造连续覆盖。Composite load 重新验证 constituent hash，referenced segment 禁止删除。
+
 Replay 使用虚拟时钟读取相同 canonical events，不重新调用外部 API，并按 `ingestSeq` 稳定合并不同分片。所有在 tick 前收到的 event 先更新 runtime，然后每 1 秒执行 signal freshness/prune 与 strategy observation；最后一个 event 后补齐到下一完整 tick。Backtest 优先读取实际 LIVE observation tape，以保留真实 timer jitter；没有 tape 的 canonical dataset 才使用固定 1 秒 reconstructed timeline。Replay UI 必须显式标识，不能冒充 live；eventId 与 visual seed 原样复用。
 
 Batch backtest 先将一个 COMPLETE dataset prepare 成 immutable observation sequence，再让最多 128 个 validated/deduplicated configs 复用，避免参数网格按 variant 重读 partition。experiment metadata 与 variant result 分文件原子持久化在 `data/backtests/`；列表只携带 config 与 summary，完整 equity/basket/fill result 按需读取。当前 queue 为单进程串行模型，重启时非终态工作明确失败；扩展到多 worker 前必须增加 lease、attempt fencing 与幂等 result commit。
@@ -934,6 +936,7 @@ S0/paper build 不包含 execution client。`accountSubscribe` 只能看到 acco
 - preview/order 参数只能来自 server-side pair、mint、notional、slippage allowlist，不能把任意用户 JSON 透传给 0x/Jupiter；
 - `/api/replay/start|stop` 仅 local/demo-admin 使用；公开 deployment 默认不注册这些 routes，避免外部用户切换全站状态；
 - paper preview/order 使用 idempotency key；失败重试不能重复扣 API quota或重复写单。
+- SIDE-023 的单 operator deployment 使用一枚至少 24 字符的 `SIDE_ADMIN_PASSCODE`，通过 HTTPS header 保护全部 state-changing API 和 archive download；浏览器只在当前 tab session 保存 passcode。它不替代多用户认证系统。
 
 ### Future live 0x
 

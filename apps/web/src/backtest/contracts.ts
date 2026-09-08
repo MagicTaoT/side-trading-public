@@ -15,6 +15,18 @@ export interface BacktestDataset {
   signalModelVersions: string[];
   datasetSha256: string | null;
   failure: string | null;
+  datasetKind?: "RECORDED" | "COMPOSITE";
+  rangeStartMs?: number;
+  rangeEndMs?: number;
+}
+
+export interface RecordingArchive {
+  schemaVersion: 1;
+  datasetId: string;
+  fileName: string;
+  createdAtMs: number;
+  bytes: number;
+  sha256: string;
 }
 
 export interface BacktestDatasetReference {

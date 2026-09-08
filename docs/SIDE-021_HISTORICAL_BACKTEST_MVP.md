@@ -10,6 +10,8 @@
 
 ## 双层数据集
 
+> SIDE-022 已把这里的“每次启动一个 dataset”扩展为 UTC 对齐的 3h 自动轮转与归档；本节保留 SIDE-021 原始格式 contract，运行时生命周期以 SIDE-022 为准。
+
 LIVE 服务每次启动创建一个 dataset，默认目录为 `data/recordings/`：
 
 ```text
@@ -33,7 +35,7 @@ data/recordings/<dataset-id>/
 配置：
 
 - `SIDE_RECORDING_DIR`：覆盖默认 recording root；
-- `SIDE_RECORDING_DATASET_ID`：覆盖自动生成的本次 dataset ID；
+- SIDE-021 原始实现曾支持 `SIDE_RECORDING_DATASET_ID`；SIDE-022 的轮转 recorder 不再接受固定 ID，避免窗口覆盖和混写；
 - `GET /api/recording/status`：当前 dataset、计数和 failure；
 - `GET /api/backtest-datasets`：可发现的 manifest，包括 OPEN/FAILED，供 UI 明确显示但不可运行。
 

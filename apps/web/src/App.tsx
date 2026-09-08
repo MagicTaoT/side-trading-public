@@ -20,6 +20,7 @@ import {
 } from "./performance.js";
 import { StrategyPage } from "./strategy/StrategyPage.js";
 import { BacktestPage } from "./backtest/BacktestPage.js";
+import { adminFetch } from "./admin.js";
 
 interface SourceState {
   provider: string;
@@ -591,7 +592,7 @@ function PaperDrawer({ action, mode, freshJuryCount, onClose, onRecorded }: Pape
     setOrder(null);
     setRecordKey(requestKey());
     try {
-      const response = await fetch("/api/paper-orders/preview", {
+      const response = await adminFetch("/api/paper-orders/preview", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
         body: JSON.stringify({ side: action, provider, primaryFailureId })
@@ -627,7 +628,7 @@ function PaperDrawer({ action, mode, freshJuryCount, onClose, onRecorded }: Pape
     let active = true;
     const refresh = async () => {
       try {
-        const response = await fetch(`/api/paper-orders/${encodeURIComponent(order.orderId)}`);
+        const response = await adminFetch(`/api/paper-orders/${encodeURIComponent(order.orderId)}`);
         const current = await responseBody<PaperApiOrder>(response, "order");
         if (active) {
           setOrder(current);
@@ -654,7 +655,7 @@ function PaperDrawer({ action, mode, freshJuryCount, onClose, onRecorded }: Pape
     setRecordPending(true);
     setRequestError(null);
     try {
-      const response = await fetch("/api/paper-orders", {
+      const response = await adminFetch("/api/paper-orders", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": recordKey },
         body: JSON.stringify({
@@ -744,7 +745,7 @@ function DashboardPage() {
   const websocketRetryAttempt = useRef(0);
 
   const loadSnapshot = useCallback(async () => {
-    const response = await fetch("/api/state");
+    const response = await adminFetch("/api/state");
     if (!response.ok) throw new Error(`State fetch failed with HTTP ${response.status}`);
     setSnapshot((await response.json()) as RuntimeSnapshot);
   }, []);
@@ -752,7 +753,7 @@ function DashboardPage() {
   const loadPaperPrices = useCallback(async () => {
     setPaperPricesLoading(true);
     try {
-      const response = await fetch("/api/paper-prices");
+      const response = await adminFetch("/api/paper-prices");
       setPaperPrices(await responseBody<PaperPriceBoardSnapshot>(response, "prices"));
       setPaperPriceClockMs(Date.now());
     } catch {
@@ -860,7 +861,7 @@ function DashboardPage() {
 
   const setReplay = useCallback(async (action: "start" | "stop") => {
     setError(null);
-    const response = await fetch(`/api/replay/${action}`, { method: "POST" });
+    const response = await adminFetch(`/api/replay/${action}`, { method: "POST" });
     if (!response.ok) throw new Error(`Replay ${action} failed with HTTP ${response.status}`);
     const body = (await response.json()) as { snapshot: RuntimeSnapshot };
     setSnapshot(body.snapshot);
@@ -872,7 +873,7 @@ function DashboardPage() {
     websocketRetryAttempt.current = 0;
     if (action === "disconnect") setWebsocketsEnabled(false);
     try {
-      const response = await fetch(`/api/websockets/${action}`, { method: "POST" });
+      const response = await adminFetch(`/api/websockets/${action}`, { method: "POST" });
       if (!response.ok) throw new Error(`WebSocket ${action} failed with HTTP ${response.status}`);
       if (action === "disconnect") {
         setConnection("DISCONNECTED");

@@ -40,6 +40,14 @@ export interface RecordedObservationPartition extends RecordedPartition {
   signalModelVersion: string;
 }
 
+export interface CompositeDatasetSegment {
+  datasetId: string;
+  datasetSha256: string;
+  firstObservationAtMs: number;
+  lastObservationAtMs: number;
+  observationCount: number;
+}
+
 export interface EventDatasetManifest {
   schemaVersion: 1;
   datasetId: string;
@@ -63,6 +71,10 @@ export interface EventDatasetManifest {
   observationPartitions: RecordedObservationPartition[];
   datasetSha256: string | null;
   failure: string | null;
+  datasetKind?: "RECORDED" | "COMPOSITE";
+  segments?: CompositeDatasetSegment[];
+  rangeStartMs?: number;
+  rangeEndMs?: number;
 }
 
 export interface EventRecorderStatus {
@@ -190,7 +202,11 @@ function manifestFingerprint(manifest: EventDatasetManifest): string {
     firstIngestSeq: manifest.firstIngestSeq,
     lastIngestSeq: manifest.lastIngestSeq,
     eventPartitions: manifest.eventPartitions.map(({ path, recordCount, sha256 }) => ({ path, recordCount, sha256 })),
-    observationPartitions: manifest.observationPartitions.map(({ path, recordCount, sha256 }) => ({ path, recordCount, sha256 }))
+    observationPartitions: manifest.observationPartitions.map(({ path, recordCount, sha256 }) => ({ path, recordCount, sha256 })),
+    datasetKind: manifest.datasetKind ?? "RECORDED",
+    segments: manifest.segments ?? null,
+    rangeStartMs: manifest.rangeStartMs ?? null,
+    rangeEndMs: manifest.rangeEndMs ?? null
   };
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
@@ -456,6 +472,19 @@ function parseManifest(value: unknown): EventDatasetManifest {
   ) {
     throw new Error("INVALID_DATASET_MANIFEST");
   }
+  if (manifest.datasetKind === "COMPOSITE") {
+    if (
+      manifest.status !== "COMPLETE" ||
+      manifest.datasetSha256 === null ||
+      !Array.isArray(manifest.segments) ||
+      manifest.segments.length === 0 ||
+      !Number.isSafeInteger(manifest.rangeStartMs) ||
+      !Number.isSafeInteger(manifest.rangeEndMs) ||
+      (manifest.rangeEndMs as number) <= (manifest.rangeStartMs as number)
+    ) {
+      throw new Error("INVALID_COMPOSITE_DATASET_MANIFEST");
+    }
+  }
   return manifest;
 }
 
@@ -508,6 +537,7 @@ export async function loadEventDataset(
 ): Promise<{ manifest: EventDatasetManifest; events: MarketEvent[] }> {
   const manifest = await readManifest(rootDir, datasetId);
   if (manifest.status !== "COMPLETE" && !options.allowOpen) throw new Error("DATASET_NOT_COMPLETE");
+  if (manifest.datasetKind === "COMPOSITE") throw new Error("COMPOSITE_EVENT_REPLAY_UNSUPPORTED");
   const contents = await Promise.all(manifest.eventPartitions.map((partition) => verifiedPartition(rootDir, datasetId, partition)));
   const events = orderForReplay(contents.flatMap((content) => decodeEventLog(content)));
   if (events.length !== manifest.eventCount) throw new Error("DATASET_EVENT_COUNT_MISMATCH");
@@ -521,6 +551,26 @@ export async function loadObservationTape(
 ): Promise<{ manifest: EventDatasetManifest; observations: RecordedStrategyObservation[] }> {
   const manifest = await readManifest(rootDir, datasetId);
   if (manifest.status !== "COMPLETE" && !options.allowOpen) throw new Error("DATASET_NOT_COMPLETE");
+  if (manifest.datasetKind === "COMPOSITE") {
+    const byTimestamp = new Map<number, { observation: RecordedStrategyObservation; createdAtMs: number }>();
+    for (const segment of manifest.segments as CompositeDatasetSegment[]) {
+      const loaded = await loadObservationTape(rootDir, segment.datasetId);
+      if (loaded.manifest.datasetKind === "COMPOSITE" || loaded.manifest.datasetSha256 !== segment.datasetSha256) {
+        throw new Error("COMPOSITE_SEGMENT_IDENTITY_MISMATCH");
+      }
+      for (const observation of loaded.observations) {
+        if (observation.atMs < (manifest.rangeStartMs as number) || observation.atMs > (manifest.rangeEndMs as number)) continue;
+        const existing = byTimestamp.get(observation.atMs);
+        if (!existing || loaded.manifest.createdAtMs >= existing.createdAtMs) {
+          byTimestamp.set(observation.atMs, { observation, createdAtMs: loaded.manifest.createdAtMs });
+        }
+      }
+    }
+    const observations = [...byTimestamp.values()].map(({ observation }) => observation).sort((left, right) => left.atMs - right.atMs);
+    validateObservationOrder(observations);
+    if (observations.length !== manifest.observationCount) throw new Error("DATASET_OBSERVATION_COUNT_MISMATCH");
+    return { manifest, observations };
+  }
   const contents = await Promise.all(
     manifest.observationPartitions.map((partition) => verifiedPartition(rootDir, datasetId, partition))
   );
@@ -529,10 +579,121 @@ export async function loadObservationTape(
     .map((line) => parseRecordedStrategyObservation(JSON.parse(line) as unknown))
     .sort((left, right) => left.atMs - right.atMs);
   if (observations.length !== manifest.observationCount) throw new Error("DATASET_OBSERVATION_COUNT_MISMATCH");
+  validateObservationOrder(observations);
+  return { manifest, observations };
+}
+
+function validateObservationOrder(observations: readonly RecordedStrategyObservation[]): void {
   for (let index = 1; index < observations.length; index += 1) {
     if ((observations[index - 1] as RecordedStrategyObservation).atMs >= (observations[index] as RecordedStrategyObservation).atMs) {
       throw new Error("DATASET_OBSERVATION_TIME_NOT_STRICTLY_INCREASING");
     }
   }
-  return { manifest, observations };
+}
+
+export interface CreateDurationCompositeOptions {
+  hours: 3 | 6 | 12 | 24 | 72;
+  endAtMs?: number;
+  maxGapMs?: number;
+}
+
+function compactStamp(atMs: number): string {
+  return new Date(atMs).toISOString().replace(/[-:.]/gu, "");
+}
+
+/** Builds a virtual dataset over immutable tapes without copying their partitions. */
+export async function createDurationCompositeDataset(
+  rootDir: string,
+  options: CreateDurationCompositeOptions
+): Promise<EventDatasetManifest> {
+  if (![3, 6, 12, 24, 72].includes(options.hours)) throw new Error("INVALID_COMPOSITE_DURATION");
+  const maxGapMs = options.maxGapMs ?? 5_000;
+  if (!Number.isSafeInteger(maxGapMs) || maxGapMs < 1_000) throw new Error("INVALID_COMPOSITE_MAX_GAP");
+  const candidates = (await listEventDatasets(rootDir)).filter((manifest) =>
+    manifest.datasetKind !== "COMPOSITE" &&
+    manifest.status === "COMPLETE" &&
+    manifest.datasetSha256 !== null &&
+    manifest.observationCount > 0 &&
+    manifest.firstObservationAtMs !== null &&
+    manifest.lastObservationAtMs !== null
+  );
+  if (candidates.length === 0) throw new Error("COMPOSITE_DATASET_HAS_NO_SEGMENTS");
+  const endAtMs = options.endAtMs ?? Math.max(...candidates.map(({ lastObservationAtMs }) => lastObservationAtMs as number));
+  const rangeStartMs = endAtMs - options.hours * 60 * 60 * 1_000;
+  if (!Number.isSafeInteger(endAtMs) || rangeStartMs < 0) throw new Error("INVALID_COMPOSITE_RANGE");
+
+  const relevant = candidates
+    .filter(({ firstObservationAtMs, lastObservationAtMs }) =>
+      (lastObservationAtMs as number) >= rangeStartMs && (firstObservationAtMs as number) <= endAtMs
+    )
+    .sort((left, right) => (left.firstObservationAtMs as number) - (right.firstObservationAtMs as number));
+  const loaded = await Promise.all(relevant.map(async (manifest) => ({ manifest, tape: await loadObservationTape(rootDir, manifest.datasetId) })));
+  const byTimestamp = new Map<number, { observation: RecordedStrategyObservation; manifest: EventDatasetManifest }>();
+  for (const entry of loaded) {
+    for (const observation of entry.tape.observations) {
+      if (observation.atMs < rangeStartMs || observation.atMs > endAtMs) continue;
+      const existing = byTimestamp.get(observation.atMs);
+      if (!existing || entry.manifest.createdAtMs >= existing.manifest.createdAtMs) {
+        byTimestamp.set(observation.atMs, { observation, manifest: entry.manifest });
+      }
+    }
+  }
+  const selected = [...byTimestamp.values()].sort((left, right) => left.observation.atMs - right.observation.atMs);
+  if (selected.length === 0) throw new Error("COMPOSITE_DATASET_HAS_NO_OBSERVATIONS");
+  const firstAtMs = selected[0]?.observation.atMs as number;
+  const lastAtMs = selected[selected.length - 1]?.observation.atMs as number;
+  if (firstAtMs - rangeStartMs > maxGapMs || endAtMs - lastAtMs > maxGapMs) {
+    throw new Error("COMPOSITE_DATASET_RANGE_NOT_COVERED");
+  }
+  for (let index = 1; index < selected.length; index += 1) {
+    if ((selected[index] as typeof selected[number]).observation.atMs - (selected[index - 1] as typeof selected[number]).observation.atMs > maxGapMs) {
+      throw new Error("COMPOSITE_DATASET_HAS_GAP");
+    }
+  }
+  const used = [...new Map(selected.map(({ manifest }) => [manifest.datasetId, manifest])).values()]
+    .sort((left, right) => (left.firstObservationAtMs as number) - (right.firstObservationAtMs as number));
+  const segments: CompositeDatasetSegment[] = used.map((manifest) => ({
+    datasetId: manifest.datasetId,
+    datasetSha256: manifest.datasetSha256 as string,
+    firstObservationAtMs: manifest.firstObservationAtMs as number,
+    lastObservationAtMs: manifest.lastObservationAtMs as number,
+    observationCount: manifest.observationCount
+  }));
+  const identity = createHash("sha256").update(JSON.stringify({ rangeStartMs, endAtMs, segments })).digest("hex");
+  const datasetId = `composite-${options.hours}h-${compactStamp(rangeStartMs)}-${compactStamp(endAtMs)}-${identity.slice(0, 8)}`;
+  const manifest: EventDatasetManifest = {
+    schemaVersion: 1,
+    datasetId,
+    format: "side-canonical-dataset-v1",
+    status: "COMPLETE",
+    createdAtMs: rangeStartMs,
+    closedAtMs: endAtMs,
+    marketEventSchemaVersion: 1,
+    observationCadenceMs: 1_000,
+    eventCount: used.reduce((sum, candidate) => sum + candidate.eventCount, 0),
+    observationCount: selected.length,
+    firstReceivedAtMs: null,
+    lastReceivedAtMs: null,
+    firstObservationAtMs: firstAtMs,
+    lastObservationAtMs: lastAtMs,
+    firstIngestSeq: null,
+    lastIngestSeq: null,
+    providers: [...new Set(used.flatMap(({ providers }) => providers))].sort(),
+    signalModelVersions: [...new Set(used.flatMap(({ signalModelVersions }) => signalModelVersions))].sort(),
+    eventPartitions: [],
+    observationPartitions: [],
+    datasetSha256: identity,
+    failure: null,
+    datasetKind: "COMPOSITE",
+    segments,
+    rangeStartMs,
+    rangeEndMs: endAtMs
+  };
+  const directory = join(resolve(rootDir), safeDatasetId(datasetId));
+  await mkdir(directory, { recursive: true });
+  const target = join(directory, MANIFEST_FILE);
+  const temporary = `${target}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await rename(temporary, target);
+  return manifest;
 }

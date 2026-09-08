@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { StrategyPanel } from "./StrategyPanel.js";
+import { adminFetch } from "../admin.js";
 import "./strategy-page.css";
 
 interface WebSocketStatus {
@@ -22,7 +23,7 @@ export function StrategyPage() {
 
   const loadRuntime = useCallback(async () => {
     try {
-      const response = await fetch("/api/websockets/status");
+      const response = await adminFetch("/api/websockets/status");
       if (!response.ok) throw new Error(`HTTP_${response.status}`);
       setRuntime(await response.json() as WebSocketStatus);
       setRuntimeError(null);

@@ -6,6 +6,7 @@ import type {
   BacktestParameterGrid,
   BacktestResult,
   BacktestVariant,
+  RecordingArchive,
   SavedConfigOption
 } from "./contracts.js";
 import {
@@ -17,9 +18,10 @@ import {
 } from "./presentation.js";
 import "../strategy/strategy-page.css";
 import "./backtest-page.css";
+import { adminFetch, storedAdminPasscode, storeAdminPasscode } from "../admin.js";
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await adminFetch(url, init);
   const body = await response.json() as Record<string, unknown>;
   if (!response.ok) {
     const error = body.error && typeof body.error === "object" ? body.error as Record<string, unknown> : null;
@@ -73,8 +75,23 @@ function allBaskets(result: BacktestResult): StrategyBasketSnapshot[] {
     : result.baskets;
 }
 
+type CompositeHours = 3 | 6 | 12 | 24 | 72;
+
+const COMPOSITE_DURATIONS: ReadonlyArray<{ hours: CompositeHours; label: string }> = [
+  { hours: 3, label: "3H" },
+  { hours: 6, label: "6H" },
+  { hours: 12, label: "12H" },
+  { hours: 24, label: "24H" },
+  { hours: 72, label: "3D" }
+];
+
+function adminHeaders(passcode: string): Record<string, string> {
+  return passcode ? { "x-side-admin-passcode": passcode } : {};
+}
+
 export function BacktestPage() {
   const [datasets, setDatasets] = useState<BacktestDataset[]>([]);
+  const [archives, setArchives] = useState<RecordingArchive[]>([]);
   const [configRevisions, setConfigRevisions] = useState<StrategyConfigRevision[]>([]);
   const [experiments, setExperiments] = useState<BacktestExperiment[]>([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
@@ -94,6 +111,10 @@ export function BacktestPage() {
   });
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deleteArchiveId, setDeleteArchiveId] = useState<string | null>(null);
+  const [adminRequired, setAdminRequired] = useState<boolean | null>(null);
+  const [adminPasscode, setAdminPasscode] = useState(storedAdminPasscode);
+  const [adminVerified, setAdminVerified] = useState(false);
 
   const configOptions = useMemo<SavedConfigOption[]>(() => [
     { key: "baseline", label: "Built-in baseline", revision: null, config: DEFAULT_STRATEGY_CONFIG },
@@ -106,13 +127,15 @@ export function BacktestPage() {
   ], [configRevisions]);
 
   const loadCatalog = useCallback(async () => {
-    const [datasetBody, configBody] = await Promise.all([
+    const [datasetBody, configBody, archiveBody] = await Promise.all([
       api<{ datasets: BacktestDataset[] }>("/api/backtest-datasets"),
-      api<{ configs: StrategyConfigRevision[] }>("/api/paper-strategy-configs?limit=100")
+      api<{ configs: StrategyConfigRevision[] }>("/api/paper-strategy-configs?limit=100"),
+      api<{ archives: RecordingArchive[] }>("/api/recording/archives")
     ]);
     const sorted = datasetBody.datasets.sort((left, right) => right.createdAtMs - left.createdAtMs);
     setDatasets(sorted);
     setConfigRevisions(configBody.configs);
+    setArchives(archiveBody.archives);
     setSelectedDatasetId((current) => current || sorted.find(({ status }) => status === "COMPLETE")?.datasetId || "");
   }, []);
 
@@ -120,6 +143,12 @@ export function BacktestPage() {
     const body = await api<{ experiments: BacktestExperiment[] }>("/api/backtest-experiments?limit=50");
     setExperiments(body.experiments);
     setSelectedExperimentId((current) => current ?? body.experiments[0]?.experimentId ?? null);
+  }, []);
+
+  const loadAdminStatus = useCallback(async () => {
+    const body = await api<{ required: boolean }>("/api/admin/status");
+    setAdminRequired(body.required);
+    if (!body.required) setAdminVerified(true);
   }, []);
 
   const loadSelectedExperiment = useCallback(async (experimentId: string) => {
@@ -130,11 +159,11 @@ export function BacktestPage() {
   useEffect(() => {
     document.title = "SIDE · Backtest Lab";
     setBusy("loading");
-    Promise.all([loadCatalog(), loadExperiments()])
+    Promise.all([loadCatalog(), loadExperiments(), loadAdminStatus()])
       .then(() => setError(null))
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))
       .finally(() => setBusy(null));
-  }, [loadCatalog, loadExperiments]);
+  }, [loadAdminStatus, loadCatalog, loadExperiments]);
 
   useEffect(() => {
     if (!selectedExperimentId) {
@@ -168,6 +197,24 @@ export function BacktestPage() {
     : null;
   const chartPoints = result ? equityPolyline(result.equityCurve, 920, 220, 18) : "";
 
+  const adminUnlocked = adminRequired === false || adminVerified;
+
+  const verifyAdmin = async () => {
+    try {
+      setBusy("admin");
+      await api("/api/admin/verify", { method: "POST", headers: adminHeaders(adminPasscode) });
+      storeAdminPasscode(adminPasscode);
+      setAdminVerified(true);
+      setError(null);
+    } catch (reason) {
+      setAdminVerified(false);
+      storeAdminPasscode("");
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const submit = async () => {
     try {
       if (!selectedDatasetId) throw new Error("SELECT_A_COMPLETE_DATASET");
@@ -189,12 +236,74 @@ export function BacktestPage() {
       }
       const body = await api<{ experiment: BacktestExperiment }>("/api/backtest-experiments", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...adminHeaders(adminPasscode) },
         body: JSON.stringify(payload)
       });
       setExperiments((current) => [body.experiment, ...current]);
       setSelectedExperimentId(body.experiment.experimentId);
       setSelectedExperiment(body.experiment);
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const buildDurationDataset = async (hours: CompositeHours) => {
+    try {
+      setBusy(`composite:${hours}`);
+      const body = await api<{ dataset: BacktestDataset }>("/api/backtest-datasets/composites", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...adminHeaders(adminPasscode) },
+        body: JSON.stringify({ hours })
+      });
+      await loadCatalog();
+      setSelectedDatasetId(body.dataset.datasetId);
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const deleteArchive = async (datasetId: string) => {
+    if (deleteArchiveId !== datasetId) {
+      setDeleteArchiveId(datasetId);
+      return;
+    }
+    try {
+      setBusy(`delete:${datasetId}`);
+      await api(`/api/recording/archives/${datasetId}`, {
+        method: "DELETE",
+        headers: { "x-side-confirm-delete": datasetId, ...adminHeaders(adminPasscode) }
+      });
+      setDeleteArchiveId(null);
+      await loadCatalog();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const downloadArchive = async (archive: RecordingArchive) => {
+    try {
+      setBusy(`download:${archive.datasetId}`);
+      const response = await adminFetch(`/api/recording/archives/${archive.datasetId}/download`, {
+        headers: adminHeaders(adminPasscode)
+      });
+      if (!response.ok) {
+        const body = await response.json() as { error?: { code?: string } };
+        throw new Error(body.error?.code ?? `HTTP_${response.status}`);
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = archive.fileName;
+      anchor.click();
+      URL.revokeObjectURL(url);
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -227,7 +336,7 @@ export function BacktestPage() {
       setBusy("cancel");
       const body = await api<{ experiment: BacktestExperiment }>(
         `/api/backtest-experiments/${selectedExperiment.experimentId}/cancel`,
-        { method: "POST" }
+        { method: "POST", headers: adminHeaders(adminPasscode) }
       );
       setSelectedExperiment(body.experiment);
       setError(null);
@@ -259,6 +368,14 @@ export function BacktestPage() {
         <p>Compare saved configurations or sweep a parameter grid against an immutable recorded dataset. Results use the current gross theoretical execution model.</p>
       </section>
 
+      <section className={`admin-access ${adminUnlocked ? "unlocked" : "locked"}`} aria-label="Research admin access">
+        <div><span className="kicker">SIDE-023</span><strong>{adminUnlocked ? "ADMIN UNLOCKED" : adminRequired === null ? "CHECKING ADMIN GATE" : "ADMIN PASSCODE REQUIRED"}</strong></div>
+        {adminRequired ? <form onSubmit={(event) => { event.preventDefault(); void verifyAdmin(); }}>
+          <input type="password" value={adminPasscode} autoComplete="off" placeholder="Enter admin passcode" onChange={(event) => { setAdminPasscode(event.target.value); setAdminVerified(false); }} />
+          <button type="submit" disabled={busy !== null || adminPasscode.length === 0}>{busy === "admin" ? "VERIFYING…" : "UNLOCK"}</button>
+        </form> : <span>Management actions are available without a passcode in this runtime.</span>}
+      </section>
+
       {error ? <div className="backtest-alert" role="alert"><strong>BACKTEST ERROR</strong><span>{error.replaceAll("_", " ")}</span><button type="button" onClick={() => setError(null)}>DISMISS</button></div> : null}
 
       <section className="backtest-builder" aria-label="Create backtest experiment">
@@ -279,6 +396,9 @@ export function BacktestPage() {
                 {datasets.map((dataset) => <option key={dataset.datasetId} value={dataset.datasetId} disabled={dataset.status !== "COMPLETE"}>{dataset.datasetId} · {dataset.status}</option>)}
               </select>
             </label>
+            <div className="duration-builder" role="group" aria-label="Build continuous duration dataset">
+              {COMPOSITE_DURATIONS.map(({ hours, label }) => <button key={hours} type="button" disabled={busy !== null || !adminUnlocked} onClick={() => void buildDurationDataset(hours)}>{busy === `composite:${hours}` ? `VERIFYING ${label}…` : `BUILD ${label} DATASET`}</button>)}
+            </div>
             {selectedDataset ? <div className="dataset-facts">
               <div><span>STATUS</span><strong className={selectedDataset.status.toLowerCase()}>{selectedDataset.status}</strong></div>
               <div><span>DURATION</span><strong>{duration(selectedDataset.createdAtMs, selectedDataset.closedAtMs)}</strong></div>
@@ -314,7 +434,21 @@ export function BacktestPage() {
         </div>
         <div className="backtest-submit-row">
           <p>Grid values are comma-separated. Every combination is validated and deduplicated before execution.</p>
-          <button type="button" className="primary-backtest-action" disabled={busy !== null || selectedDataset?.status !== "COMPLETE"} onClick={() => void submit()}>{busy === "submit" ? "QUEUING…" : "RUN EXPERIMENT"}</button>
+          <button type="button" className="primary-backtest-action" disabled={busy !== null || !adminUnlocked || selectedDataset?.status !== "COMPLETE"} onClick={() => void submit()}>{busy === "submit" ? "QUEUING…" : "RUN EXPERIMENT"}</button>
+        </div>
+      </section>
+
+      <section className="recording-archives" aria-label="Downloadable recording archives">
+        <div className="backtest-section-heading">
+          <div><span className="kicker">MANUAL RETENTION</span><h2>3H RECORDING PACKAGES</h2></div>
+          <span>DOWNLOAD · VERIFY SHA-256 · DELETE MANUALLY</span>
+        </div>
+        <div className="archive-list">
+          {archives.length === 0 ? <p className="empty-copy">No packaged recording is ready yet.</p> : archives.map((archive) => <article key={archive.datasetId}>
+            <div><strong>{archive.datasetId}</strong><span>{(archive.bytes / 1024 / 1024).toFixed(2)} MB · SHA-256 {archive.sha256.slice(0, 16)}…</span></div>
+            <button type="button" disabled={busy !== null || !adminUnlocked} className="download" onClick={() => void downloadArchive(archive)}>{busy === `download:${archive.datasetId}` ? "DOWNLOADING…" : "DOWNLOAD"}</button>
+            <button type="button" disabled={busy !== null || !adminUnlocked} className={deleteArchiveId === archive.datasetId ? "confirm" : ""} onClick={() => void deleteArchive(archive.datasetId)}>{busy === `delete:${archive.datasetId}` ? "DELETING…" : deleteArchiveId === archive.datasetId ? "CONFIRM DELETE" : "DELETE"}</button>
+          </article>)}
         </div>
       </section>
 
@@ -338,7 +472,7 @@ export function BacktestPage() {
           {!selectedExperiment ? <div className="backtest-empty-state"><strong>SELECT AN EXPERIMENT</strong><span>Leaderboard and results appear here.</span></div> : <>
             <div className="experiment-detail-header">
               <div><span className="kicker">{selectedExperiment.status} · {selectedExperiment.datasetId}</span><h2>{selectedExperiment.name}</h2><p>{selectedExperiment.completedVariantCount}/{selectedExperiment.variantCount} complete · created {compactTime(selectedExperiment.createdAtMs)}</p></div>
-              {(selectedExperiment.status === "QUEUED" || selectedExperiment.status === "RUNNING") ? <button type="button" className="cancel-action" disabled={busy === "cancel" || selectedExperiment.cancelRequested} onClick={() => void cancelExperiment()}>{selectedExperiment.cancelRequested ? "CANCEL REQUESTED" : "CANCEL"}</button> : null}
+              {(selectedExperiment.status === "QUEUED" || selectedExperiment.status === "RUNNING") ? <button type="button" className="cancel-action" disabled={!adminUnlocked || busy === "cancel" || selectedExperiment.cancelRequested} onClick={() => void cancelExperiment()}>{selectedExperiment.cancelRequested ? "STOP REQUESTED" : "STOP BACKTEST"}</button> : null}
             </div>
             <div className="leaderboard-wrap">
               <table aria-label="Backtest variant leaderboard">

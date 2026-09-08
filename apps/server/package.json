@@ -1,12 +1,14 @@
 {
   "name": "@side/server",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc -b && mkdir -p dist/migrations && cp migrations/*.sql dist/migrations/",
     "dev": "node --conditions=development --watch --import tsx src/main.ts",
     "start": "node dist/src/main.js",
+    "recording:recover-recent": "node --conditions=development --import tsx src/recording/recover-recent.ts",
+    "recording:import": "node --conditions=development --import tsx src/recording/import-archive.ts",
     "smoke": "node --import tsx src/smoke.ts",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run --exclude '**/dist/**'"

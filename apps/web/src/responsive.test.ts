@@ -90,6 +90,14 @@ describe("cockpit responsive contract", () => {
     expect(backtestPage).toContain('aria-label="Backtest variant leaderboard"');
     expect(backtestPage).toContain('aria-label="Equity curve"');
     expect(backtestPage).toContain('aria-label="Basket fill sequence"');
+    expect(backtestPage).toContain('{ hours: 3, label: "3H" }');
+    expect(backtestPage).toContain('{ hours: 6, label: "6H" }');
+    expect(backtestPage).toContain('{ hours: 12, label: "12H" }');
+    expect(backtestPage).toContain('{ hours: 24, label: "24H" }');
+    expect(backtestPage).toContain('{ hours: 72, label: "3D" }');
+    expect(backtestPage).toContain("STOP BACKTEST");
+    expect(backtestPage).toContain("3H RECORDING PACKAGES");
+    expect(backtestPage).toContain("ADMIN PASSCODE REQUIRED");
     expect(backtestPageCss).toMatch(/\.backtest-workspace\s*\{[\s\S]*?grid-template-columns/);
     expect(backtestPageCss).toMatch(/@media \(max-width: 760px\)[\s\S]*?\.basket-browser/);
   });
@@ -102,7 +110,7 @@ describe("cockpit responsive contract", () => {
   });
 
   it("keeps display-only buy and sell prices around the central edge", () => {
-    expect(app).toContain('fetch("/api/paper-prices")');
+    expect(app).toContain('adminFetch("/api/paper-prices")');
     expect(app).toMatch(/<PaperPriceTile side="BUY"[\s\S]*?verdict-main[\s\S]*?<PaperPriceTile side="SELL"/);
     expect(app).toContain("Five-second display estimate. Display only.");
     expect(app).not.toMatch(/<PaperPriceTile[^>]*onClick=/);
@@ -110,7 +118,7 @@ describe("cockpit responsive contract", () => {
   });
 
   it("keeps reversible WebSocket resource controls at the bottom of the dashboard", () => {
-    expect(app).toContain('fetch(`/api/websockets/${action}`, { method: "POST" })');
+    expect(app).toContain('adminFetch(`/api/websockets/${action}`, { method: "POST" })');
     expect(app).toContain("DISCONNECT ALL WS");
     expect(app).toContain("RECONNECT ALL WS");
     expect(app).toMatch(/<footer>[\s\S]*?className="websocket-controls"[\s\S]*?<\/footer>/);

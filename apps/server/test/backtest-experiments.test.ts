@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PartitionedEventRecorder } from "@side/recorder-replay";
+import { createDatasetArchive, PartitionedEventRecorder } from "@side/recorder-replay";
 import type { StrategyConfigV1 } from "@side/strategy-engine";
 import { createApp } from "../src/app.js";
 import { BacktestExperimentService, expandExperimentConfigs } from "../src/backtest/experiments.js";
@@ -131,5 +131,88 @@ describe("backtest experiment batches", () => {
     const resultResponse = await app.inject({ method: "GET", url: `/api/backtest-experiments/${experimentId}/variants/variant-001` });
     expect(resultResponse.statusCode).toBe(200);
     expect(resultResponse.json().result).toMatchObject({ executionModel: "GROSS_THEORETICAL_V1", equityCurve: expect.any(Array) });
+  });
+
+  it("lists, downloads, and explicitly deletes a completed recording archive", async () => {
+    const { recordingRoot, resultRoot } = await completedTape();
+    const archiveRoot = join(resultRoot, "archives");
+    const archived = await createDatasetArchive(recordingRoot, archiveRoot, "experiment-tape");
+    const app = await createApp({
+      replayJsonl: "",
+      recordingRootDir: recordingRoot,
+      recordingArchiveRootDir: archiveRoot,
+      backtestResultRootDir: resultRoot
+    });
+    apps.push(app);
+
+    const list = await app.inject({ method: "GET", url: "/api/recording/archives" });
+    expect(list.json().archives).toEqual([archived]);
+    const download = await app.inject({ method: "GET", url: "/api/recording/archives/experiment-tape/download" });
+    expect(download.statusCode).toBe(200);
+    expect(download.headers["content-disposition"]).toContain("experiment-tape.tar.gz");
+    expect(download.rawPayload.subarray(0, 2)).toEqual(Buffer.from([0x1f, 0x8b]));
+
+    expect((await app.inject({ method: "DELETE", url: "/api/recording/archives/experiment-tape" })).statusCode).toBe(400);
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/recording/archives/experiment-tape",
+      headers: { "x-side-confirm-delete": "experiment-tape" }
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toEqual({ deleted: true, datasetId: "experiment-tape" });
+  });
+
+  it("fails closed when a requested 24-hour composite lacks a valid range", async () => {
+    const { recordingRoot, resultRoot } = await completedTape();
+    const app = await createApp({ replayJsonl: "", recordingRootDir: recordingRoot, backtestResultRootDir: resultRoot });
+    apps.push(app);
+    const response = await app.inject({ method: "POST", url: "/api/backtest-datasets/composites", payload: { hours: 24 } });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: { code: "INVALID_COMPOSITE_RANGE" } });
+  });
+
+  it("accepts only the supported research durations", async () => {
+    const { recordingRoot, resultRoot } = await completedTape();
+    const app = await createApp({ replayJsonl: "", recordingRootDir: recordingRoot, backtestResultRootDir: resultRoot });
+    apps.push(app);
+    for (const hours of [3, 6, 12, 24, 72]) {
+      const response = await app.inject({ method: "POST", url: "/api/backtest-datasets/composites", payload: { hours } });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).not.toBe("INVALID_COMPOSITE_DURATION");
+    }
+    const unsupported = await app.inject({ method: "POST", url: "/api/backtest-datasets/composites", payload: { hours: 168 } });
+    expect(unsupported.statusCode).toBe(400);
+    expect(unsupported.json()).toMatchObject({ error: { code: "INVALID_COMPOSITE_DURATION" } });
+  });
+
+  it("protects research mutations and archive downloads with one passcode", async () => {
+    const { recordingRoot, resultRoot } = await completedTape();
+    const archiveRoot = join(resultRoot, "protected-archives");
+    await createDatasetArchive(recordingRoot, archiveRoot, "experiment-tape");
+    const passcode = "0123456789abcdef0123456789abcdef";
+    const app = await createApp({
+      replayJsonl: "",
+      recordingRootDir: recordingRoot,
+      recordingArchiveRootDir: archiveRoot,
+      backtestResultRootDir: resultRoot,
+      adminPasscode: passcode
+    });
+    apps.push(app);
+
+    expect((await app.inject({ method: "GET", url: "/api/admin/status" })).json()).toEqual({ required: true });
+    expect((await app.inject({ method: "POST", url: "/api/admin/verify" })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/api/admin/verify", headers: { "x-side-admin-passcode": "wrong" } })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/api/admin/verify", headers: { "x-side-admin-passcode": passcode } })).json()).toEqual({ accepted: true });
+    expect((await app.inject({ method: "GET", url: "/api/recording/archives/experiment-tape/download" })).statusCode).toBe(401);
+    expect((await app.inject({
+      method: "GET",
+      url: "/api/recording/archives/experiment-tape/download",
+      headers: { "x-side-admin-passcode": passcode }
+    })).statusCode).toBe(200);
+    expect((await app.inject({
+      method: "POST",
+      url: "/api/backtest-experiments",
+      payload: { datasetId: "experiment-tape", configs: [baseConfig] }
+    })).statusCode).toBe(401);
   });
 });

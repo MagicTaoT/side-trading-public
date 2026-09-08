@@ -1,7 +1,19 @@
 import websocket from "@fastify/websocket";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import type WebSocket from "ws";
-import type { EventRecorder } from "@side/recorder-replay";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { readFile, rm, stat } from "node:fs/promises";
+import { resolve, sep } from "node:path";
+import {
+  createDurationCompositeDataset,
+  datasetArchivePath,
+  deleteDatasetArchive,
+  listEventDatasets,
+  listDatasetArchives,
+  type EventDatasetManifest,
+  type EventRecorder
+} from "@side/recorder-replay";
 import { StrategyConfigError, type StrategyConfigV1, type StrategyObservation } from "@side/strategy-engine";
 import { BacktestError, BacktestRunner } from "./backtest/runner.js";
 import { BacktestExperimentService } from "./backtest/experiments.js";
@@ -41,7 +53,9 @@ export interface CreateAppOptions {
   strategyJournal?: StrategyJournal;
   eventRecorder?: EventRecorder;
   recordingRootDir?: string;
+  recordingArchiveRootDir?: string;
   backtestResultRootDir?: string;
+  adminPasscode?: string;
 }
 
 const MAX_SOCKET_BUFFER_BYTES = 256 * 1024;
@@ -118,6 +132,18 @@ function optionalStrategyId(value: string | undefined): string | undefined {
 
 export async function createApp(options: CreateAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: options.logger ?? false });
+  const adminPasscode = options.adminPasscode?.trim() || null;
+  if (adminPasscode !== null && adminPasscode.length < 24) throw new Error("SIDE_ADMIN_PASSCODE_TOO_SHORT");
+  const requireAdmin = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (adminPasscode === null) return;
+    const candidate = request.headers["x-side-admin-passcode"];
+    const candidateHash = createHash("sha256").update(typeof candidate === "string" ? candidate : "").digest();
+    const expectedHash = createHash("sha256").update(adminPasscode).digest();
+    if (!timingSafeEqual(candidateHash, expectedHash)) {
+      return reply.code(401).send({ error: { code: "ADMIN_PASSCODE_REQUIRED" } });
+    }
+  };
+  const adminRoute = { preHandler: requireAdmin };
   const mode = options.mode ?? "REPLAY";
   const runtime = new S0Runtime(
     options.replayJsonl,
@@ -204,6 +230,8 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     : null;
   if (mode === "LIVE" && !live) throw new Error("LIVE mode requires live source configuration");
   let tickTimer: NodeJS.Timeout | null = null;
+  let recorderFlushTimer: NodeJS.Timeout | null = null;
+  let recorderFlushPromise: Promise<void> | null = null;
   let websocketsEnabled = true;
   const dashboardSockets = new Map<WebSocket, () => void>();
 
@@ -231,7 +259,68 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   }));
   app.get("/health/sources", async () => ({ mode: runtime.snapshot().mode, sources: runtime.snapshot().sources }));
   app.get("/api/state", async () => runtime.snapshot());
+  app.get("/api/admin/status", async () => ({ required: adminPasscode !== null }));
+  app.post("/api/admin/verify", adminRoute, async () => ({ accepted: true }));
   app.get("/api/recording/status", async () => options.eventRecorder?.status() ?? { enabled: false as const });
+  app.get("/api/recording/archives", async () => ({
+    archives: options.recordingArchiveRootDir ? await listDatasetArchives(options.recordingArchiveRootDir) : []
+  }));
+  app.get<{ Params: { datasetId: string } }>("/api/recording/archives/:datasetId/download", adminRoute, async (request, reply) => {
+    if (!options.recordingArchiveRootDir) {
+      return reply.code(503).send({ error: { code: "RECORDING_ARCHIVE_STORAGE_NOT_CONFIGURED" } });
+    }
+    try {
+      const target = datasetArchivePath(options.recordingArchiveRootDir, request.params.datasetId);
+      const archiveStat = await stat(target);
+      return reply
+        .header("content-type", "application/gzip")
+        .header("content-length", String(archiveStat.size))
+        .header("content-disposition", `attachment; filename="${request.params.datasetId}.tar.gz"`)
+        .send(createReadStream(target));
+    } catch {
+      return reply.code(404).send({ error: { code: "RECORDING_ARCHIVE_NOT_FOUND" } });
+    }
+  });
+  app.delete<{ Params: { datasetId: string }; Headers: { "x-side-confirm-delete"?: string } }>(
+    "/api/recording/archives/:datasetId",
+    adminRoute,
+    async (request, reply) => {
+      const datasetId = request.params.datasetId;
+      if (!options.recordingArchiveRootDir || !options.recordingRootDir) {
+        return reply.code(503).send({ error: { code: "RECORDING_ARCHIVE_STORAGE_NOT_CONFIGURED" } });
+      }
+      if (request.headers["x-side-confirm-delete"] !== datasetId) {
+        return reply.code(400).send({ error: { code: "RECORDING_DELETE_CONFIRMATION_REQUIRED" } });
+      }
+      if (options.eventRecorder?.status().datasetId === datasetId) {
+        return reply.code(409).send({ error: { code: "ACTIVE_RECORDING_CANNOT_BE_DELETED" } });
+      }
+      try {
+        const dependent = (await listEventDatasets(options.recordingRootDir)).find(({ segments }) =>
+          segments?.some((segment) => segment.datasetId === datasetId)
+        );
+        if (dependent) {
+          return reply.code(409).send({ error: { code: "RECORDING_REFERENCED_BY_COMPOSITE", dependentDatasetId: dependent.datasetId } });
+        }
+        const recordingRoot = resolve(options.recordingRootDir);
+        const datasetRoot = resolve(recordingRoot, datasetId);
+        if (!datasetRoot.startsWith(`${recordingRoot}${sep}`)) throw new Error("INVALID_DATASET_PATH");
+        const manifest = JSON.parse(await readFile(resolve(datasetRoot, "manifest.json"), "utf8")) as EventDatasetManifest;
+        if (manifest.datasetId !== datasetId || manifest.status !== "COMPLETE") {
+          return reply.code(409).send({ error: { code: "ONLY_COMPLETE_RECORDING_CAN_BE_DELETED" } });
+        }
+        const archiveDeleted = await deleteDatasetArchive(options.recordingArchiveRootDir, datasetId);
+        if (!archiveDeleted) return reply.code(404).send({ error: { code: "RECORDING_ARCHIVE_NOT_FOUND" } });
+        await rm(datasetRoot, { recursive: true });
+        return reply.send({ deleted: true, datasetId });
+      } catch (reason) {
+        if ((reason as NodeJS.ErrnoException).code === "ENOENT") {
+          return reply.code(404).send({ error: { code: "RECORDING_ARCHIVE_NOT_FOUND" } });
+        }
+        throw reason;
+      }
+    }
+  );
   app.get("/api/backtest-datasets", async (_request, reply) => {
     if (!backtests) return reply.send({ datasets: [] });
     try {
@@ -240,7 +329,22 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       return backtestError(reply, reason);
     }
   });
-  app.post<{ Body: unknown }>("/api/backtests", async (request, reply) => {
+  app.post<{ Body: unknown }>("/api/backtest-datasets/composites", { bodyLimit: 8 * 1024, ...adminRoute }, async (request, reply) => {
+    if (!options.recordingRootDir) return reply.code(503).send({ error: { code: "BACKTEST_STORAGE_NOT_CONFIGURED" } });
+    try {
+      const body = object(request.body);
+      if (body.hours !== 3 && body.hours !== 6 && body.hours !== 12 && body.hours !== 24 && body.hours !== 72) {
+        throw new BacktestError(400, "INVALID_COMPOSITE_DURATION");
+      }
+      const manifest = await createDurationCompositeDataset(options.recordingRootDir, { hours: body.hours });
+      return reply.code(201).send({ dataset: manifest });
+    } catch (reason) {
+      if (reason instanceof BacktestError) return backtestError(reply, reason);
+      const code = reason instanceof Error ? reason.message : "COMPOSITE_DATASET_ERROR";
+      return backtestError(reply, new BacktestError(409, code));
+    }
+  });
+  app.post<{ Body: unknown }>("/api/backtests", adminRoute, async (request, reply) => {
     if (!backtests) return reply.code(503).send({ error: { code: "BACKTEST_STORAGE_NOT_CONFIGURED" } });
     try {
       const body = object(request.body);
@@ -256,7 +360,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     if (!backtestExperiments) return reply.send({ experiments: [] });
     return reply.send({ experiments: backtestExperiments.list(boundedLimit(request.query.limit, 30, 100)) });
   });
-  app.post<{ Body: unknown }>("/api/backtest-experiments", async (request, reply) => {
+  app.post<{ Body: unknown }>("/api/backtest-experiments", adminRoute, async (request, reply) => {
     if (!backtestExperiments) {
       return reply.code(503).send({ error: { code: "BACKTEST_STORAGE_NOT_CONFIGURED" } });
     }
@@ -279,7 +383,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       return backtestError(reply, reason);
     }
   });
-  app.post<{ Params: { experimentId: string } }>("/api/backtest-experiments/:experimentId/cancel", async (request, reply) => {
+  app.post<{ Params: { experimentId: string } }>("/api/backtest-experiments/:experimentId/cancel", adminRoute, async (request, reply) => {
     if (!backtestExperiments) {
       return reply.code(503).send({ error: { code: "BACKTEST_STORAGE_NOT_CONFIGURED" } });
     }
@@ -305,7 +409,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     }
   );
   app.get("/api/websockets/status", async () => websocketStatus());
-  app.post("/api/websockets/disconnect", async () => {
+  app.post("/api/websockets/disconnect", adminRoute, async () => {
     const wasEnabled = websocketsEnabled;
     websocketsEnabled = false;
     if (wasEnabled) live?.stop();
@@ -322,7 +426,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       ...websocketStatus()
     };
   });
-  app.post("/api/websockets/reconnect", async () => {
+  app.post("/api/websockets/reconnect", adminRoute, async () => {
     const wasEnabled = websocketsEnabled;
     websocketsEnabled = true;
     if (!wasEnabled) live?.start();
@@ -336,7 +440,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     }
   });
 
-  app.post("/api/paper-orders/preview", { bodyLimit: 8 * 1024 }, async (request, reply) => {
+  app.post("/api/paper-orders/preview", { bodyLimit: 8 * 1024, ...adminRoute }, async (request, reply) => {
     try {
       const body = object(request.body);
       const side = body.side;
@@ -357,7 +461,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     }
   });
 
-  app.post("/api/paper-orders", { bodyLimit: 8 * 1024 }, async (request, reply) => {
+  app.post("/api/paper-orders", { bodyLimit: 8 * 1024, ...adminRoute }, async (request, reply) => {
     try {
       const body = object(request.body);
       const action = body.action;
@@ -383,7 +487,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     return order ? reply.send({ order }) : reply.code(404).send({ error: { code: "PAPER_ORDER_NOT_FOUND" } });
   });
 
-  app.delete<{ Params: { id: string } }>("/api/paper-orders/:id", async (request, reply) => {
+  app.delete<{ Params: { id: string } }>("/api/paper-orders/:id", adminRoute, async (request, reply) => {
     try {
       const deleted = await paper.deleteOrder(request.params.id);
       return deleted
@@ -402,7 +506,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   app.get("/api/shadow-performance", async () => ({ performance: await paper.performance() }));
 
-  app.post("/api/paper-strategy-configs", { bodyLimit: 16 * 1024 }, async (request, reply) => {
+  app.post("/api/paper-strategy-configs", { bodyLimit: 16 * 1024, ...adminRoute }, async (request, reply) => {
     try {
       const body = object(request.body);
       const strategyId = body.strategyId ?? null;
@@ -431,7 +535,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   app.get("/api/paper-strategy-runs/active", async () => ({ run: strategy.activeRun() }));
 
-  app.post("/api/paper-strategy-runs", { bodyLimit: 8 * 1024 }, async (request, reply) => {
+  app.post("/api/paper-strategy-runs", { bodyLimit: 8 * 1024, ...adminRoute }, async (request, reply) => {
     try {
       const body = object(request.body);
       if (typeof body.strategyId !== "string") throw new StrategyPolicyError(400, "INVALID_STRATEGY_ID");
@@ -446,7 +550,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     }
   });
 
-  app.post<{ Params: { id: string } }>("/api/paper-strategy-runs/:id/stop", async (request, reply) => {
+  app.post<{ Params: { id: string } }>("/api/paper-strategy-runs/:id/stop", adminRoute, async (request, reply) => {
     try {
       const active = strategy.activeRun();
       const atMs = mode === "REPLAY"
@@ -481,7 +585,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     }
   });
 
-  app.post("/api/replay/start", async (_request, reply) => {
+  app.post("/api/replay/start", adminRoute, async (_request, reply) => {
     if (mode === "LIVE") return reply.code(409).send({ accepted: false, reason: "replay_disabled_in_live_mode" });
     const active = strategy.activeRun();
     if (active && active.snapshot.evaluatedAtMs !== active.startedAtMs) {
@@ -507,7 +611,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     }
   });
 
-  app.post("/api/replay/stop", async (_request, reply) => {
+  app.post("/api/replay/stop", adminRoute, async (_request, reply) => {
     if (mode === "LIVE") return reply.code(409).send({ accepted: false, reason: "replay_disabled_in_live_mode" });
     const snapshot = runtime.stopReplay();
     return reply.send({ accepted: true, snapshot });
@@ -535,6 +639,18 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     live?.start();
     markoutWorker.start();
     if (live) {
+      let flushingRecorder = false;
+      recorderFlushTimer = setInterval(() => {
+        if (flushingRecorder || recorderFlushPromise || closing || !options.eventRecorder) return;
+        flushingRecorder = true;
+        recorderFlushPromise = options.eventRecorder.flush()
+          .catch((reason) => app.log.error({ err: reason }, "Recording manifest checkpoint failed"))
+          .finally(() => {
+            flushingRecorder = false;
+            recorderFlushPromise = null;
+          });
+      }, 60_000);
+      recorderFlushTimer.unref();
       tickTimer = setInterval(() => {
         if (closing) return;
         const atMs = Date.now();
@@ -547,9 +663,11 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   app.addHook("onClose", async () => {
     closing = true;
     if (tickTimer) clearInterval(tickTimer);
+    if (recorderFlushTimer) clearInterval(recorderFlushTimer);
     markoutWorker.stop();
     live?.stop();
     for (const socket of dashboardSockets.keys()) removeDashboardSocket(socket);
+    if (recorderFlushPromise) await recorderFlushPromise;
     await Promise.all([
       backtestExperiments?.close() ?? Promise.resolve(),
       strategy.close(),

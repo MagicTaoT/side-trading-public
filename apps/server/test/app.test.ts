@@ -14,6 +14,10 @@ afterEach(async () => {
 });
 
 describe("S0 runtime HTTP surface", () => {
+  it("rejects a configured admin passcode that is too short", async () => {
+    await expect(createApp({ replayJsonl, adminPasscode: "not-long-enough" })).rejects.toThrow("SIDE_ADMIN_PASSCODE_TOO_SHORT");
+  });
+
   it("reports process, readiness and empty source health before replay", async () => {
     const app = await createApp({ replayJsonl });
     apps.push(app);

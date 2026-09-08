@@ -1,6 +1,6 @@
 {
   "name": "side-trading",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.5.2",
@@ -11,7 +11,9 @@
     "check": "pnpm typecheck && pnpm test",
     "dev:s0": "pnpm --parallel --stream --filter @side/server --filter @side/web dev",
     "smoke:s0": "pnpm --filter @side/server smoke",
-    "preflight:s0": "pnpm --filter @side/source-preflight preflight"
+    "preflight:s0": "pnpm --filter @side/source-preflight preflight",
+    "recording:recover-recent": "pnpm --filter @side/server recording:recover-recent",
+    "recording:import": "pnpm --filter @side/server recording:import"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { PartitionedEventRecorder } from "@side/recorder-replay";
+import { createDatasetArchive, RotatingEventRecorder, THREE_HOURS_MS } from "@side/recorder-replay";
 import { createApp } from "./app.js";
 import { loadDefaultReplayFixture } from "./fixture.js";
 import { discoverCoinbaseSlpProduct } from "./live/coordinator.js";
@@ -8,7 +8,7 @@ import { MemoryDecisionJournal, PostgresDecisionJournal } from "./paper/journal.
 import { MemoryStrategyJournal, PostgresStrategyJournal } from "./strategy/journal.js";
 
 const invocationDirectory = process.env.INIT_CWD ?? process.cwd();
-for (const fileName of [".env.preflight.local", ".env.live.local"]) {
+for (const fileName of [".env.preflight.local", ".env.live.local", ".env.admin.local"]) {
   const path = resolve(invocationDirectory, fileName);
   if (existsSync(path)) process.loadEnvFile(path);
 }
@@ -21,13 +21,24 @@ const bitqueryToken = process.env.BITQUERY_TOKEN;
 const zeroexApiKey = process.env.ZEROEX_API_KEY;
 const jupiterApiKey = process.env.JUPITER_API_KEY;
 const databaseUrl = process.env.DATABASE_URL;
+const adminPasscode = process.env.SIDE_ADMIN_PASSCODE;
 const recordingRootDir = resolve(invocationDirectory, process.env.SIDE_RECORDING_DIR ?? "data/recordings");
+const recordingArchiveRootDir = resolve(invocationDirectory, process.env.SIDE_RECORDING_ARCHIVE_DIR ?? "data/recording-archives");
 const backtestResultRootDir = resolve(invocationDirectory, process.env.SIDE_BACKTEST_DIR ?? "data/backtests");
-const recordingDatasetId = process.env.SIDE_RECORDING_DATASET_ID;
+const recordingSegmentMs = Number.parseInt(process.env.SIDE_RECORDING_SEGMENT_MS ?? String(THREE_HOURS_MS), 10);
 const eventRecorder = mode === "LIVE"
-  ? new PartitionedEventRecorder({
+  ? new RotatingEventRecorder({
       rootDir: recordingRootDir,
-      ...(recordingDatasetId ? { datasetId: recordingDatasetId } : {})
+      segmentMs: recordingSegmentMs,
+      onSegmentComplete: async ({ datasetId, eventCount, observationCount }) => {
+        if (eventCount === 0 && observationCount === 0) return;
+        try {
+          const archive = await createDatasetArchive(recordingRootDir, recordingArchiveRootDir, datasetId);
+          console.info(`Recording archive ready: ${archive.fileName} sha256=${archive.sha256}`);
+        } catch (reason) {
+          console.error("Recording archive failed; COMPLETE source dataset retained", reason);
+        }
+      }
     })
   : undefined;
 const coinbasePerpProductId = mode === "LIVE"
@@ -43,7 +54,9 @@ const app = await createApp({
   journal: databaseUrl ? new PostgresDecisionJournal(databaseUrl) : new MemoryDecisionJournal(),
   strategyJournal: databaseUrl ? new PostgresStrategyJournal(databaseUrl) : new MemoryStrategyJournal(),
   recordingRootDir,
+  recordingArchiveRootDir,
   backtestResultRootDir,
+  ...(adminPasscode ? { adminPasscode } : {}),
   ...(eventRecorder ? { eventRecorder } : {}),
   ...(mode === "LIVE" && bitqueryToken && coinbasePerpProductId
     ? { live: { bitqueryToken, coinbasePerpProductId } }

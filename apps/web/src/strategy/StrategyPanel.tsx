@@ -10,9 +10,10 @@ import {
 import { pnlTone, signedQuote, summarizeStrategyBaskets } from "./presentation.js";
 import "./strategy.css";
 import "./strategy-history.css";
+import { adminFetch } from "../admin.js";
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await adminFetch(url, init);
   const body = await response.json() as Record<string, unknown>;
   if (!response.ok) {
     const error = typeof body.error === "object" && body.error !== null ? body.error as Record<string, unknown> : null;
